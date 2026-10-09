@@ -27,7 +27,7 @@ CORRUPT_PACKET_TOLERANCE = 10
 # Decode backend selection through `JASNA_DECODE_BACKEND`:
 # - "auto":    NVIDIA tries VALI first and falls back to PyAV hwaccel, then PyAV
 #              software, when VALI cannot open or decode the first frame. AMD
-#              keeps its AMF -> software escalation.
+#              keeps its AMF -> software escalation. Apple/CPU use software.
 # - "vali":    VALI only; any failure raises (NVIDIA only).
 # - "pyav-hw": skip VALI, use the PyAV hwaccel path with its software fallback.
 # - "pyav-sw": force FFmpeg software decoding with GPU upload on every vendor.
@@ -281,7 +281,9 @@ class VideoReader:
                     return self
             elif backend == "vali":
                 raise VideoDecodeError("The VALI decode backend requires an NVIDIA device")
-        software_only = backend == "pyav-sw"
+        software_only = backend == "pyav-sw" or self.vendor in {
+            AcceleratorVendor.APPLE, AcceleratorVendor.CPU,
+        }
         self._software_only = software_only
         try:
             if not software_only and self.vendor is AcceleratorVendor.NVIDIA:
@@ -515,6 +517,8 @@ class VideoReader:
             and group[0].format.name == "cuda"
         ):
             backend = self._frames_hardware(decoded, group)
+        elif vendor in {AcceleratorVendor.APPLE, AcceleratorVendor.CPU}:
+            backend = self._frames_host_rgb(decoded, group)
         else:
             if vendor is AcceleratorVendor.NVIDIA and not self._software_only:
                 log.warning(
@@ -531,6 +535,50 @@ class VideoReader:
         # for the reader's lifetime costs about 96 MiB of avoidable VRAM.
         del group
         yield from backend
+
+    def _frames_host_rgb(self, decoded, group: list) -> Iterator[tuple[torch.Tensor, list[int]]]:
+        """Software RGB24 conversion and blocking CPU/MPS batch handoff.
+
+        A fresh, unpinned host batch owns its pixels independently of PyAV's
+        reusable planes. No private streams or asynchronous staging reuse: the
+        device copy completes before host storage is released or a caller can
+        pass the result to another worker. NVIDIA/ROCm retain their YUV path.
+        """
+        if self.metadata.is_10bit or self.metadata.color_transfer.lower() in {
+            "smpte2084", "arib-std-b67",
+        }:
+            raise VideoDecodeError("CPU/MPS software decode currently supports only 8-bit SDR")
+        reformatter = VideoReformatter()
+        color_range = AvColorRange.JPEG if self._full_range else AvColorRange.MPEG
+        H, W = self.height, self.width
+        while group:
+            host = torch.empty((len(group), 3, H, W), dtype=torch.uint8, device="cpu")
+            pts = [frame.pts for frame in group]
+            for i, frame in enumerate(group):
+                # FFmpeg AVCOL_TRC_SMPTE2084=16, AVCOL_TRC_ARIB_STD_B67=18.
+                if frame.color_trc in {16, 18} or any(
+                    component.bits > 8 for component in frame.format.components
+                ):
+                    raise VideoDecodeError("CPU/MPS software decode currently supports only 8-bit SDR")
+                try:
+                    rgb = reformatter.reformat(
+                        frame, width=W, height=H, format="rgb24",
+                        src_colorspace=self.metadata.color_space,
+                        dst_colorspace=self.metadata.color_space,
+                        src_color_range=color_range,
+                        dst_color_range=AvColorRange.JPEG,
+                    )
+                except av.FFmpegError as e:
+                    raise VideoDecodeError(f"Failed to decode {self.file}: {e}") from e
+                plane = rgb.planes[0]
+                pixels = torch.frombuffer(plane, dtype=torch.uint8).view(H, plane.line_size)
+                host[i].copy_(pixels[:, :W * 3].reshape(H, W, 3).permute(2, 0, 1))
+            # The blocking copy is the handoff boundary. A separate global MPS
+            # synchronize is unnecessary and can race other decoder threads.
+            batch = host.to(self.device, non_blocking=False)
+            # No read-ahead after cancellation at a yielded batch boundary.
+            yield batch, pts
+            group = self._read_group(decoded)
 
     def _frames_hardware(self, decoded, group: list) -> Iterator[tuple[torch.Tensor, list[int]]]:
         # FFmpeg 8 maps NVDEC output on CUDA stream 0. Conversion runs in a
@@ -567,7 +615,7 @@ class VideoReader:
         # accepts (NV12 for <=8-bit sources, P010 above), keeping the resolved
         # matrix/range identical on both reformat sides so swscale changes only
         # layout/subsampling/depth. The one authoritative YUV->RGB conversion
-        # stays in the CUDA kernel.
+        # stays in the GPU converter (NVIDIA kernel or ROCm Torch fallback).
         depth = max(
             (component.bits for component in group[0].format.components if component.bits),
             default=10 if self.metadata.is_10bit else 8,
@@ -593,9 +641,8 @@ class VideoReader:
         color_range = AvColorRange.JPEG if self._full_range else AvColorRange.MPEG
         H, W = self.height, self.width
 
-        # Pinned host batch is shared. Device staging is gated on
-        # AcceleratorVendor.AMD (not "if not NVIDIA") so Intel/CPU keep the
-        # historical single-staging private-stream fallback unless AMD-specific.
+        # Pinned host batch is shared by the NVIDIA/AMD paths. CPU/MPS use
+        # _frames_host_rgb instead; device YUV staging stays vendor-specific.
         # NVIDIA: one staging frame on a private stream (H2D+convert ordered so
         # the next overwrite starts only after the prior kernel consumed it).
         # AMD (issue #252): batch device YUV on current_stream. Isolated D1 was

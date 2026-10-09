@@ -29,10 +29,18 @@ def metadata(video_path):
     return get_video_meta_data(video_path)
 
 
+@pytest.fixture(params=["cpu", "mps", "cuda"])
+def device(request):
+    if request.param == "mps" and not torch.backends.mps.is_available():
+        pytest.skip("requires real MPS")
+    if request.param == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires CUDA/ROCm")
+    return torch.device(request.param)
+
+
 class TestSeekBehavior:
-    def test_sequential_read_speed(self, video_path, metadata):
+    def test_sequential_read_speed(self, video_path, metadata, device):
         """Baseline: read first 5 batches sequentially from start."""
-        device = torch.device("cuda:0")
         with VideoReader(video_path, batch_size=24, device=device, metadata=metadata) as reader:
             t0 = time.monotonic()
             frames_read = 0
@@ -45,9 +53,8 @@ class TestSeekBehavior:
             print(f"\nSequential: {frames_read} frames in {elapsed:.2f}s = {fps:.0f} fps")
             assert fps > 30, f"Sequential read too slow: {fps:.0f} fps"
 
-    def test_seek_then_read_speed(self, video_path, metadata):
+    def test_seek_then_read_speed(self, video_path, metadata, device):
         """Seek to mid-video then read 5 batches."""
-        device = torch.device("cuda:0")
         seek_frame = metadata.num_frames // 2
         seek_ts = seek_frame / metadata.video_fps
         with VideoReader(video_path, batch_size=24, device=device, metadata=metadata) as reader:
@@ -66,9 +73,8 @@ class TestSeekBehavior:
                   f"{frames_read} frames in {elapsed:.2f}s = {fps:.0f} fps")
             assert fps > 30, f"Seek+read too slow: {fps:.0f} fps"
 
-    def test_seek_pts_are_sequential(self, video_path, metadata):
+    def test_seek_pts_are_sequential(self, video_path, metadata, device):
         """After a seek, PTS values should be sequential (not repeating)."""
-        device = torch.device("cuda:0")
         seek_frame = metadata.num_frames // 3
         seek_ts = seek_frame / metadata.video_fps
         all_pts = []
@@ -83,9 +89,8 @@ class TestSeekBehavior:
                 f"PTS not increasing at index {i}: {all_pts[i-1]} -> {all_pts[i]}"
             )
 
-    def test_two_readers_seek_same_frame(self, video_path, metadata):
+    def test_two_readers_seek_same_frame(self, video_path, metadata, device):
         """Two readers seeking to the same frame should produce same PTS."""
-        device = torch.device("cuda:0")
         seek_frame = metadata.num_frames // 2
         with (
             VideoReader(video_path, batch_size=24, device=device, metadata=metadata) as r1,
@@ -111,9 +116,8 @@ class TestSeekBehavior:
             print(f"\nTwo readers seek to {seek_frame}: {frames1}+{frames2} frames in {elapsed:.2f}s = {combined_fps:.0f} fps combined")
             assert pts1 == pts2, f"PTS mismatch between readers"
 
-    def test_seek_does_not_repeat_on_subsequent_batches(self, video_path, metadata):
+    def test_seek_does_not_repeat_on_subsequent_batches(self, video_path, metadata, device):
         """Verify that batch 2+ after a seek continues forward, not re-seeking."""
-        device = torch.device("cuda:0")
         seek_frame = metadata.num_frames // 2
         seek_ts = seek_frame / metadata.video_fps
         batch_times = []
@@ -132,7 +136,7 @@ class TestSeekBehavior:
             f"suggests re-seeking on each batch"
         )
 
-    def test_seek_honors_nonzero_stream_start_time(self, video_path, tmp_path):
+    def test_seek_honors_nonzero_stream_start_time(self, video_path, tmp_path, device):
         """Seek targets must be offset by the stream's start_time, and the first
         returned frame must not precede the requested timestamp."""
         import subprocess
@@ -146,7 +150,6 @@ class TestSeekBehavior:
             check=True,
         )
         shifted_meta = get_video_meta_data(str(shifted))
-        device = torch.device("cuda:0")
         seek_ts = 2.5
         with VideoReader(str(shifted), batch_size=8, device=device, metadata=shifted_meta) as reader:
             _, pts = next(iter(reader.frames(seek_ts=seek_ts)))
