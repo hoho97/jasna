@@ -9,7 +9,8 @@ from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
 
-from jasna.accelerator import is_amd_device, is_nvidia_device
+from jasna.accelerator import is_amd_device, is_apple_device, is_nvidia_device
+from jasna.model_weights import validate_weights_path
 from jasna.engine_paths import get_onnx_tensorrt_engine_path
 from jasna.media.resize_normalize import ResizeNormalizer
 from jasna.mosaic.detections import Detections
@@ -35,6 +36,8 @@ def compile_rfdetr_engine(
     dynamic_batch: bool,
     fp16: bool,
 ) -> Path:
+    if is_apple_device(device):
+        return validate_weights_path(weights_path, suffix=".pt", model="RF-DETR on Apple/MPS")
     if is_amd_device(device):
         # AMD runs the trained checkpoint through the rfdetr torch model
         # (RfDetrTorchRunner); there is no ahead-of-time engine to build.
@@ -85,10 +88,12 @@ class RfDetrMosaicDetectionModel:
         if self.batch_size <= 0:
             raise ValueError(f"batch_size must be > 0, got {batch_size}")
 
-        if is_amd_device(self.device):
+        if is_amd_device(self.device) or is_apple_device(self.device):
             if torch_variant is None:
                 raise RuntimeError(
-                    f"RF-DETR on AMD requires a torch variant for {weights_path.name}"
+                    f"RF-DETR Torch requires a torch variant for {weights_path.name}; "
+                    "use rfdetr-v6, rfdetr-v6-large or rfdetr-vr-v1. "
+                    "Legacy checkpoint variants cannot be inferred."
                 )
             from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner
 
@@ -238,9 +243,11 @@ class RfDetrMosaicDetectionModel:
     def scan_scores_masks(
         self, frames_uint8_bchw: torch.Tensor, *, mask_hw: tuple[int, int]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """GPU-only fast path for whole-video scanning: per-frame best score
-        (B,) float32 and merged low-res mask (B, mask_h, mask_w) bool, with no
-        host synchronization."""
+        """Per-frame best score (B,) float32 and merged low-res bool mask.
+
+        MPS uses a local CPU area resize for non-divisible spatial sizes;
+        inference, mask merging and returned tensors stay on the GPU.
+        """
 
         x = self._preprocess(frames_uint8_bchw)
         outs = self._infer(x)
@@ -249,7 +256,15 @@ class RfDetrMosaicDetectionModel:
         pred_masks = outs[self.masks_out]  # (B, Q, Hm, Wm)
         active = (pred_masks > 0.0) & (per_query > self.score_threshold)[:, :, None, None]
         merged = active.any(dim=1, keepdim=True).float()
-        merged = F.interpolate(merged, size=mask_hw, mode="area") > 0.0
+        if merged.device.type == "mps" and any(
+            source % target for source, target in zip(merged.shape[-2:], mask_hw)
+        ):
+            # MPS adaptive_avg_pool2d rejects non-divisible sizes. Transfer only
+            # the merged Bx1 low-res mask, preserving exact area/any-pixel semantics.
+            merged = F.interpolate(merged.cpu(), size=mask_hw, mode="area").to(merged.device)
+        else:
+            merged = F.interpolate(merged, size=mask_hw, mode="area")
+        merged = merged > 0.0
         return scores, merged[:, 0]
 
     def __call__(self, frames_uint8_bchw: torch.Tensor, *, target_hw: tuple[int, int]) -> Detections:
