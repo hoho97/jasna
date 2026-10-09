@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -158,8 +159,54 @@ def _resolve_cli_encoder_settings(
     )
 
 
+class _DeviceArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        from jasna.accelerator import AcceleratorVendor, vendor_for_device
+
+        if parsed.device is None:
+            parsed.device = "mps" if vendor_for_device() is AcceleratorVendor.APPLE else "cuda:0"
+        apple = parsed.device.split(":", 1)[0] == "mps"
+        # Resolve after parsing so explicit --device cuda:0 retains the original
+        # NVIDIA/ROCm defaults even on an Apple host. Explicit flags always win.
+        for name, (cuda_default, mps_default) in {
+            "batch_size": (4, 1), "fp16": (True, False),
+            "compile_basicvsrpp": (True, False), "max_clip_size": (90, 16),
+            "temporal_overlap": (8, 2), "vr_mode": ("auto", "off"),
+            "codec": ("hevc", "h264"),
+        }.items():
+            if getattr(parsed, name) is None:
+                setattr(parsed, name, mps_default if apple else cuda_default)
+        return parsed
+
+
+def _validate_mps_cli_options(args: argparse.Namespace) -> None:
+    """Reject unsupported explicit options before loading any checkpoints."""
+    if args.device.split(":", 1)[0] != "mps":
+        return
+    if args.fp16 or args.compile_basicvsrpp:
+        raise ValueError("Apple/MPS requires --no-fp16 and --no-compile-basicvsrpp (the MPS defaults).")
+    if not 1 <= args.batch_size <= 2 or not 1 <= args.max_clip_size <= 32:
+        raise ValueError("Apple/MPS requires --batch-size 1..2 and --max-clip-size 1..32.")
+    if args.codec != "h264":
+        raise ValueError("Apple/MPS currently supports --codec h264 software encoding only.")
+    if args.vr_mode != "off":
+        raise ValueError("VR (including auto-detection) is not supported on mps; use --vr-mode off.")
+    if args.detection_model.strip().lower() != "rfdetr-v6":
+        raise ValueError("Apple/MPS CLI currently supports --detection-model rfdetr-v6 only.")
+    if args.cq is not None:
+        raise ValueError("Apple/MPS software encoding uses --encoder-settings crf=23,preset=medium; --cq is unsupported.")
+    if args.license_email or args.license_key:
+        raise ValueError("Supporter/protected models are not supported on Apple/MPS; use free checkpoints.")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="jasna")
+    parser = _DeviceArgumentParser(prog="jasna", epilog=(
+        "Apple/MPS defaults: --device mps --batch-size 1 --no-fp16 "
+        "--no-compile-basicvsrpp --max-clip-size 16 --temporal-overlap 2 "
+        "--vr-mode off --codec h264 --secondary-restoration none. "
+        "NVIDIA/AMD defaults are unchanged."
+    ))
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--benchmark", action="store_true", help="Run benchmarks instead of processing video")
     parser.add_argument("--input", required=False, type=str, default=None, help="Path to input video, image, or folder")
@@ -186,11 +233,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory for temporary files created while assembling segment output (default: the output video's directory)",
     )
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Detection batch size (default: 4 on NVIDIA/AMD, 1 on MPS)")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Processing device: mps on Apple/MPS, cuda:0 on NVIDIA/AMD by default")
     parser.add_argument(
         "--fp16",
-        default=True,
+        default=None,
         action=argparse.BooleanOptionalAction,
         help=CLI_HELP["fp16"],
     )
@@ -247,21 +296,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     restoration.add_argument(
         "--compile-basicvsrpp",
-        default=True,
+        default=None,
         action=argparse.BooleanOptionalAction,
-        help=CLI_HELP["compile_basicvsrpp"],
+        help=CLI_HELP["compile_basicvsrpp"].replace("%(default)s", "True on NVIDIA/AMD, False on MPS"),
     )
     restoration.add_argument(
         "--max-clip-size",
         type=int,
-        default=90,
-        help=CLI_HELP["max_clip_size"],
+        default=None,
+        help=CLI_HELP["max_clip_size"].replace("%(default)s", "90 on NVIDIA/AMD, 16 on MPS"),
     )
     restoration.add_argument(
         "--temporal-overlap",
         type=int,
-        default=8,
-        help=CLI_HELP["temporal_overlap"],
+        default=None,
+        help=CLI_HELP["temporal_overlap"].replace("%(default)s", "8 on NVIDIA/AMD, 2 on MPS"),
     )
     restoration.add_argument(
         "--enable-crossfade",
@@ -431,7 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--detection-model-path",
         type=str,
         default="",
-        help='Optional path to detection weights. If not set, uses "model_weights/<detection-model>.onnx" (RF-DETR) or ".pt" (YOLO).',
+        help='Optional path to detection weights. RF-DETR uses .pt on Apple/AMD and .onnx on NVIDIA; YOLO uses .pt. Defaults to model_weights/<model>.',
     )
     detection.add_argument(
         "--detection-score-threshold",
@@ -462,9 +511,9 @@ def build_parser() -> argparse.ArgumentParser:
     projection.add_argument(
         "--vr-mode",
         type=str,
-        default="auto",
+        default=None,
         choices=["auto", "off", "sbs", "sbs-fisheye"],
-        help=CLI_HELP["vr_mode"],
+        help=CLI_HELP["vr_mode"].replace("%(default)s", "auto on NVIDIA/AMD, off on MPS"),
     )
 
     streaming = parser.add_argument_group("Streaming")
@@ -495,9 +544,9 @@ def build_parser() -> argparse.ArgumentParser:
     encoding.add_argument(
         "--codec",
         type=lambda value: str(value).lower(),
-        default="hevc",
+        default=None,
         choices=["hevc", "h264", "av1"],
-        help=CLI_HELP["codec"],
+        help=CLI_HELP["codec"].replace("%(default)s", "hevc on NVIDIA/AMD, h264 on MPS"),
     )
     encoding.add_argument(
         "--cq",
@@ -767,11 +816,27 @@ def _run_videos(
         if in_folder:
             print(f"[{i}/{total}] Processing {vid.name} -> {out_path.name}")
         try:
-            make_pipeline(vid, out_path).run()
+            pipeline = make_pipeline(vid, out_path)
+            # Let native decode/GPU calls finish and workers observe the existing
+            # cancellation event. Raising KeyboardInterrupt during thread startup
+            # or native work can interrupt cleanup before all queues are drained.
+            previous_sigint = signal.signal(signal.SIGINT, lambda *_: pipeline.cancel())
+            try:
+                pipeline.run()
+            except KeyboardInterrupt:
+                pipeline.cancel()
+                print("Processing cancelled")
+                raise SystemExit(130)
+            finally:
+                signal.signal(signal.SIGINT, previous_sigint)
+            if pipeline.cancel_requested is True:
+                print("Processing cancelled")
+                raise SystemExit(130)
         except UnsupportedColorspaceError as e:
             print(f"Error processing {vid.name}: {e}")
             if not in_folder:
                 sys.exit(1)
+            all_commands_ok = False
             continue
         if not post_export_video_command:
             continue
@@ -827,6 +892,7 @@ def main() -> None:
     # Reject unsupported requests before benchmarks, downloads or optional imports.
     from jasna.backend_preflight import validate_backend_options
     try:
+        _validate_mps_cli_options(args)
         validate_backend_options(
             args.device,
             secondary_restoration=args.secondary_restoration,
