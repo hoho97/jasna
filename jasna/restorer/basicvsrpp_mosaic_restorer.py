@@ -22,6 +22,9 @@ class BasicvsrppMosaicRestorer:
     ):
         self.device = torch.device(device)
         self.max_clip_size = int(max_clip_size)
+        if self.device.type == "mps" and fp16:
+            logger.warning("BasicVSR++ MPS uses FP32; FP16 restoration is not validated")
+            fp16 = False
         self.input_dtype = torch.float16 if fp16 else torch.float32
 
         self._split_forward = None
@@ -57,7 +60,8 @@ class BasicvsrppMosaicRestorer:
         Args:
             video: list of (C, H, W) tensors in RGB format, [0, 255]
         Returns:
-            (T, C, 256, 256) float tensor in [0, 1]
+            (T, C, 256, 256) float tensor on the nominal [0, 1] scale,
+            unclamped (the restoration pipeline clamps before uint8 conversion).
         """
         with torch.inference_mode():
             stacked = torch.stack(video).to(device=self.device, dtype=self.input_dtype, memory_format=torch.contiguous_format).div_(255.0)

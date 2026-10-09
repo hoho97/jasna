@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 
@@ -121,3 +122,38 @@ def test_split_forward_path_used_when_available(monkeypatch) -> None:
     assert len(captured) == 1
     assert captured[0].shape == (1, 1, 3, 256, 256)
     assert model.captured_inputs is None
+
+
+@pytest.mark.parametrize("fp16", [False, True])
+@pytest.mark.parametrize("device,vendor", [("mps", "apple"), ("cuda:0", "amd"), ("cuda:0", "nvidia"), ("cpu", "cpu")])
+def test_precision_policy_and_backend_routing(monkeypatch, caplog, fp16, device, vendor):
+    import sys
+    from types import ModuleType
+    from unittest.mock import Mock
+    import jasna.restorer.basicvsrpp_mosaic_restorer as br
+
+    model = _CaptureIdentityModel()
+    load = Mock(return_value=model)
+    split = Mock()
+    create = Mock(return_value=split)
+    engines = ModuleType("jasna.restorer.basicvsrpp_sub_engines")
+    engines.create_split_forward = create
+    monkeypatch.setitem(sys.modules, engines.__name__, engines)
+    monkeypatch.setattr(br, "load_model", load)
+    monkeypatch.setattr(br, "is_nvidia_device", lambda _: vendor == "nvidia")
+    restorer = br.BasicvsrppMosaicRestorer("checkpoint.pth", device, 3, True, fp16)
+    effective_fp16 = fp16 and vendor != "apple"
+    load.assert_called_once_with(None, "checkpoint.pth", torch.device(device), effective_fp16)
+    assert restorer.input_dtype == (torch.float16 if effective_fp16 else torch.float32)
+    if vendor == "nvidia":
+        create.assert_called_once_with(model=model, model_weights_path="checkpoint.pth",
+                                       device=torch.device(device), fp16=fp16)
+        assert restorer._split_forward is split and restorer.model is None
+    else:
+        create.assert_not_called()
+        assert restorer._split_forward is None and restorer.model is model
+    if vendor == "apple" and fp16:
+        assert "MPS uses FP32" in caplog.text
+    restorer.close()
+    if vendor == "nvidia":
+        split.close.assert_called_once()

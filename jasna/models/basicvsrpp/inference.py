@@ -42,6 +42,9 @@ def load_model(config: str | dict | None, checkpoint_path: str, device: torch.de
     register_all_modules()
     if device and type(device) == str:
         device = torch.device(device)
+    if device is not None and device.type == 'mps' and fp16:
+        logger.warning("BasicVSR++ MPS uses FP32; FP16 restoration is not validated")
+        fp16 = False
 
     if config is None:
         config = get_default_gan_inference_config()
