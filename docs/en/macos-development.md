@@ -143,3 +143,6 @@ require available MPS, all four free PyTorch files, correct tensor counts,
 shapes, all parameters/buffers on MPS, FP32 floating values, and finite outputs.
 They run both RF-DETR class heads, the BasicVSR++ feature extractor and the YOLO
 stem using actual checkpoint weights. No checkpoint is saved or modified.
+
+For the six fatbin families, Apple tensor policies, numerical checks and a
+converter-only video smoke, see [MPS tensor fallbacks](macos-mps-tensor-fallbacks.md).

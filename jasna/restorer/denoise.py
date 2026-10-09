@@ -110,7 +110,9 @@ def spatial_denoise(
         for dx in range(kernel_size):
             neighbor = padded[:, :, dy:dy + H, dx:dx + W]
             diff_sq = (frames - neighbor).pow(2).mean(dim=1, keepdim=True)
-            w = float(spatial_weights[dy, dx]) * torch.exp(diff_sq * range_scale)
+            # Keep the scalar on-device: float(tensor) synchronizes MPS/ROCm
+            # with the host once per tap in the bilateral window.
+            w = spatial_weights[dy, dx] * torch.exp(diff_sq * range_scale)
             result.addcmul_(neighbor, w.expand_as(neighbor))
             weight_sum.add_(w)
 

@@ -88,8 +88,8 @@ class YuvToRgbConverter:
     """NV12/P010 planes -> planar RGB uint8 (3, H, W) on GPU.
 
     CUDA conversion is one ahead-of-time-compiled kernel that writes directly
-    into the destination tensor. The CPU implementation is the unit-test/reference
-    path. 10-bit output uses the same 8x8 Bayer ordered dither as the VALI decoder.
+    into the destination tensor. MPS, ROCm and CPU use the eager Torch path.
+    10-bit output uses the same 8x8 Bayer ordered dither as the VALI decoder.
     """
 
     def __init__(
@@ -101,8 +101,11 @@ class YuvToRgbConverter:
         is_10bit: bool,
         device: torch.device,
     ):
+        if height % 2 or width % 2:
+            raise ValueError(f"4:2:0 conversion requires even dimensions, got {height}x{width}")
         self.height = height
         self.width = width
+        self.device = torch.device(device)
         self.is_10bit = is_10bit
         color_names = {
             AvColorspace.ITU601: "bt601",
@@ -254,6 +257,22 @@ class YuvToRgbConverter:
 
         P010 planes store the 10-bit value in the top bits (value << 6).
         """
+        if y.shape != (self.height, self.width):
+            raise ValueError(f"Unexpected luma shape: {tuple(y.shape)}")
+        if uv.shape != (self.height // 2, self.width // 2, 2):
+            raise ValueError(f"Unexpected chroma shape: {tuple(uv.shape)}")
+        if out.shape != (3, self.height, self.width) or out.dtype != torch.uint8:
+            raise ValueError(f"Unexpected RGB destination: {tuple(out.shape)} {out.dtype}")
+        if (
+            y.device != uv.device or y.device != out.device
+            or y.device.type != self.device.type
+            or (self.device.index is not None and y.device.index != self.device.index)
+        ):
+            raise ValueError("YUV/RGB tensors must be on the converter device")
+        if y.device.type == "mps":
+            expected = torch.uint16 if self.is_10bit else torch.uint8
+            if y.dtype != expected or uv.dtype != expected:
+                raise TypeError(f"Expected {expected} MPS planes, got {y.dtype} and {uv.dtype}")
         if y.is_cuda:
             if self._cuda_kernel is None:
                 # AMD/ROCm path: the coefficient tensors already live on the

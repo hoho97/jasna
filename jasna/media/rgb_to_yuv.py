@@ -1,6 +1,6 @@
 """Planar RGB to packed NV12/P010 conversion for the encoder.
 
-NVIDIA runs the fused kernel in ``rgb_to_yuv.cu``; ROCm and CPU use the Torch
+NVIDIA runs the fused kernel in ``rgb_to_yuv.cu``; MPS, ROCm and CPU use the Torch
 implementation below, which is also the reference the kernel is tested against.
 
 The kernel takes separate luma and chroma destinations. That lets the caller
@@ -170,6 +170,12 @@ class RgbToYuvConverter:
         if frame.stride(2) != 1:
             raise ValueError("RGB frame rows must be contiguous")
         if self._kernel is None:
+            if self.ten_bit and frame.device.type == "mps":
+                # MPS float->int16 casts saturate instead of wrapping. P010
+                # stores unsigned codes up to 65472 in signed encoder buffers;
+                # write through an unsigned view to preserve those bits.
+                luma = luma.view(torch.uint16)
+                chroma = chroma.view(torch.uint16)
             _rgb_to_yuv_into(
                 frame,
                 luma,
