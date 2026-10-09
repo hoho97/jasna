@@ -189,6 +189,25 @@ def validate_encoder_settings(
     codec: str,
     vendor: AcceleratorVendor | str,
 ) -> dict[str, object]:
+    if AcceleratorVendor(str(vendor)) in {AcceleratorVendor.APPLE, AcceleratorVendor.CPU}:
+        if codec != "h264":
+            raise ValueError("Software encoding currently supports only 8-bit H.264")
+        supported = {"crf", "preset", "g", "bf", "maxrate", "bufsize"}
+        invalid = sorted(set(settings) - supported)
+        if invalid:
+            raise ValueError(f"Unsupported software encoder setting(s): {invalid}; use CRF/preset semantics")
+        crf = settings.get("crf", 23)
+        try:
+            numeric_crf = float(crf)
+        except (TypeError, ValueError):
+            raise ValueError("Software CRF must be a number in 0..51") from None
+        if isinstance(crf, bool) or not math.isfinite(numeric_crf) or not 0 <= numeric_crf <= 51:
+            raise ValueError("Software CRF must be a number in 0..51")
+        if settings.get("preset", "medium") not in {
+            "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"
+        }:
+            raise ValueError("Unsupported libx264 preset")
+        return settings
     by_codec = (
         AMF_SUPPORTED_ENCODER_SETTINGS_BY_CODEC
         if AcceleratorVendor(str(vendor)) is AcceleratorVendor.AMD

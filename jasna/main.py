@@ -104,9 +104,14 @@ def _resolve_cli_encoder_settings(
     from jasna.media.encoder_settings import encoder_cq_spec, validate_encoder_cq
 
     resolved_vendor = AcceleratorVendor(str(vendor))
-    if resolved_vendor is AcceleratorVendor.APPLE:
-        raise ValueError("Apple/MPS software video encoding is not implemented yet (#11); NVENC/AMF require NVIDIA/AMD.")
     settings = parse_encoder_settings(raw_settings)
+    if resolved_vendor in {AcceleratorVendor.APPLE, AcceleratorVendor.CPU}:
+        if cq is not None:
+            raise ValueError(
+                "Software encoding uses --encoder-settings crf=23,preset=medium; "
+                "--cq is a hardware encoder control"
+            )
+        return validate_encoder_settings(settings, codec=codec, vendor=resolved_vendor)
     cq_aliases = {"cq"}
     if resolved_vendor is AcceleratorVendor.AMD:
         cq_aliases.add("qvbr_quality_level")
