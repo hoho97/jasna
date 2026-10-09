@@ -11,7 +11,7 @@ from jasna.model_weights import load_rfdetr_checkpoint
 
 logger = logging.getLogger(__name__)
 
-# RF-DETR-Seg size -> rfdetr package class. AMD runs the .pt through the rfdetr
+# RF-DETR-Seg size -> rfdetr package class. AMD and Apple run .pt through rfdetr's
 # torch model (no ONNX/MIGraphX); the size cannot be inferred from the trimmed
 # deploy checkpoint args, so the detection registry supplies it.
 _VARIANT_CLASSES: dict[str, str] = {
@@ -37,7 +37,7 @@ class TorchTensorInfo:
 
 
 class RfDetrTorchRunner:
-    """AMD/ROCm RF-DETR path: run the trained checkpoint through the rfdetr torch
+    """AMD/ROCm and Apple/MPS path: run the checkpoint through the rfdetr torch
     model instead of ONNX + MIGraphX. Mirrors the runner contract consumed by
     ``RfDetrMosaicDetectionModel`` (``input_names``/``input_dtypes``/``outputs``/
     ``output_names``/``infer``/``close``) and emits the same ``dets``/``labels``/
@@ -58,7 +58,7 @@ class RfDetrTorchRunner:
             import rfdetr
         except ImportError as exc:
             raise RuntimeError(
-                "RF-DETR on AMD requires the rfdetr package (jasna[amd])"
+                "RF-DETR Torch requires rfdetr (jasna[macos] on Apple, jasna[amd] on AMD)"
             ) from exc
 
         cls_name = _VARIANT_CLASSES.get(variant)
@@ -69,7 +69,11 @@ class RfDetrTorchRunner:
             )
 
         self.device = torch.device(device)
-        self.fp16 = bool(fp16)
+        # Apple inference is validated in FP32 only, including direct runner callers.
+        # Keep ROCm autocast behavior unchanged.
+        self.fp16 = bool(fp16) and self.device.type != "mps"
+        if fp16 and self.device.type == "mps":
+            logger.info("RF-DETR on Apple/MPS uses FP32; ignoring fp16=True")
 
         checkpoint = load_rfdetr_checkpoint(weights_path)
         state = checkpoint["model"]
