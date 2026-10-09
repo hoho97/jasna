@@ -4,7 +4,7 @@ Detectors cast the whole frame to their input dtype and divide by 255 at source
 resolution, then downscale. At 8K VR that writes a 384 MiB intermediate to
 produce a 5 MiB one. ``ResizeNormalizer`` reads the frame once instead.
 
-NVIDIA runs ``resize_normalize.cu``; ROCm and CPU keep the Torch expression the
+NVIDIA runs ``resize_normalize.cu``; MPS, ROCm and CPU keep the Torch expression the
 caller already had, which is also what the kernel is tested against.
 """
 from __future__ import annotations
