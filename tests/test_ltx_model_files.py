@@ -24,6 +24,8 @@ def test_model_check_precedes_engine_compilation(tmp_path, monkeypatch):
     from factories import session_config
     from jasna import accelerator, engine_compiler, session_factory
 
+    monkeypatch.setattr(torch.version, "cuda", "test-nvidia")
+    monkeypatch.setattr(torch.version, "hip", None)
     compile_engines = Mock()
     monkeypatch.setattr(accelerator, "is_nvidia_device", lambda device: True)
     monkeypatch.setattr(engine_compiler, "ensure_engines_compiled", compile_engines)

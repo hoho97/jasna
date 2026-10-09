@@ -163,7 +163,7 @@ def ensure_engines_compiled(
         elif not missing.basicvsrpp:
             result.use_basicvsrpp_tensorrt = True
 
-    if not any(missing):
+    if not nvidia or not any(missing):
         return result
 
     logger.info("Spawning GPU model compilation subprocess...")
@@ -231,7 +231,12 @@ def _subprocess_compile(req: EngineCompilationRequest) -> None:
     configure_rocm_process_env()
 
     device = torch.device(req.device)
-    missing = _missing_engines(req, nvidia=is_nvidia_device(device))
+    nvidia = is_nvidia_device(device)
+    if req.unet4x and not nvidia:
+        raise RuntimeError("unet-4x currently requires the NVIDIA TensorRT build")
+    missing = _missing_engines(req, nvidia=nvidia)
+    if not nvidia:
+        return
 
     if missing.basicvsrpp:
         from jasna.restorer.basicvsrpp_sub_engines import compile_basicvsrpp_engines

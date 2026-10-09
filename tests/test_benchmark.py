@@ -5,8 +5,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("nvidia_optional_modules")
 
-def test_benchmark_mode_runs_benchmark_cli() -> None:
+
+def test_benchmark_mode_runs_benchmark_cli(nvidia_build) -> None:
     with (
         patch("jasna.main.check_supported_gpu", return_value=(True, "Fake GPU")),
         patch("jasna.main.check_required_executables"),

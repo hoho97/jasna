@@ -250,6 +250,11 @@ class VideoReader:
     def __enter__(self):
         current_stream(self.device)
         backend = _decode_backend()
+        if self.vendor is AcceleratorVendor.APPLE and backend in {"vali", "pyav-hw"}:
+            raise VideoDecodeError(
+                f"Hardware decode '{backend}' is not supported on Apple/MPS. "
+                "Use JASNA_DECODE_BACKEND=auto or pyav-sw."
+            )
         if backend in ("auto", "vali"):
             if self.vendor is AcceleratorVendor.NVIDIA:
                 try:

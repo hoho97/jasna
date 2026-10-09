@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import torch
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("nvidia_build", "nvidia_optional_modules")
 
 from jasna.engine_paths import default_restoration_model_path
 from jasna.segments import SegmentRange, SegmentRestoration
@@ -117,7 +120,7 @@ def test_session_close_closes_restorers() -> None:
 
 def test_build_pipeline_passes_through_config_and_session() -> None:
     config = session_config()
-    session = RestorationSession(device=MagicMock(), restoration_pipeline=MagicMock())
+    session = RestorationSession(device=torch.device("cuda:0"), restoration_pipeline=MagicMock())
     segments = (SegmentRange(1, 2),)
     splice_plan = MagicMock()
     progress_callback = MagicMock()
@@ -146,7 +149,7 @@ def test_build_pipeline_passes_through_config_and_session() -> None:
 
 
 def test_session_reuses_its_detector_until_detection_settings_change() -> None:
-    session = RestorationSession(device=MagicMock(), restoration_pipeline=MagicMock())
+    session = RestorationSession(device=torch.device("cuda:0"), restoration_pipeline=MagicMock())
 
     with patch("jasna.mosaic.detection_registry.build_detection_model") as build:
         build.side_effect = lambda *args, **kwargs: MagicMock()
@@ -165,7 +168,7 @@ def test_session_reuses_its_detector_until_detection_settings_change() -> None:
 
 
 def test_build_pipeline_loads_a_segment_model_the_session_lacks() -> None:
-    session = RestorationSession(device=MagicMock(), restoration_pipeline=MagicMock())
+    session = RestorationSession(device=torch.device("cuda:0"), restoration_pipeline=MagicMock())
     segments = (SegmentRange(1, 2), SegmentRange(3, 4, SegmentRestoration("ltx", 9)))
 
     with (
@@ -183,7 +186,7 @@ def test_build_pipeline_loads_a_segment_model_the_session_lacks() -> None:
 
 def test_build_pipeline_keeps_a_session_that_holds_the_job_model() -> None:
     pipeline = MagicMock()
-    session = RestorationSession(device=MagicMock(), restoration_pipeline=pipeline)
+    session = RestorationSession(device=torch.device("cuda:0"), restoration_pipeline=pipeline)
 
     with patch("jasna.pipeline.Pipeline"):
         build_pipeline(session_config(), session, Path("in.mp4"), Path("out.mp4"), segments=(SegmentRange(1, 2),))

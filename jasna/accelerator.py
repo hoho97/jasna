@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 import os
 from typing import Any
@@ -41,12 +41,16 @@ class AcceleratorVendor(StrEnum):
 
 @dataclass(frozen=True)
 class AcceleratorCapabilities:
-    """Backend features whose semantics are compatible with Jasna's CUDA path."""
+    """Execution primitives and supported application features for each backend."""
 
     streams: bool
     events: bool
     ipc_collect: bool
     mem_get_info: bool
+    tensorrt: bool = False
+    secondary_restoration: bool = False
+    ltx: bool = False
+    advanced_video: bool = False
 
 
 _CUDA_LIKE_CAPABILITIES = AcceleratorCapabilities(
@@ -54,6 +58,10 @@ _CUDA_LIKE_CAPABILITIES = AcceleratorCapabilities(
     events=True,
     ipc_collect=True,
     mem_get_info=True,
+    tensorrt=True,
+    secondary_restoration=True,
+    ltx=True,
+    advanced_video=True,
 )
 _MPS_CAPABILITIES = AcceleratorCapabilities(
     streams=False,
@@ -109,8 +117,10 @@ def capabilities_for_device(
     device: torch.device | str | None = None,
 ) -> AcceleratorCapabilities:
     vendor = vendor_for_device(device)
-    if vendor in (AcceleratorVendor.NVIDIA, AcceleratorVendor.AMD):
+    if vendor is AcceleratorVendor.NVIDIA:
         return _CUDA_LIKE_CAPABILITIES
+    if vendor is AcceleratorVendor.AMD:
+        return replace(_CUDA_LIKE_CAPABILITIES, tensorrt=False, secondary_restoration=False)
     if vendor is AcceleratorVendor.APPLE:
         return _MPS_CAPABILITIES
     return _CPU_CAPABILITIES

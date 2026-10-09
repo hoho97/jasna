@@ -33,6 +33,8 @@ from jasna.media.video_encoder import (
 
 from factories import write_double_adts_aac_source
 
+pytestmark = pytest.mark.usefixtures("nvidia_build")
+
 
 def _fake_metadata(**overrides) -> VideoMetadata:
     defaults = dict(
@@ -656,7 +658,9 @@ class TestSharpening:
 
     def test_zero_strength_leaves_the_converted_frame_untouched(self, tmp_path, monkeypatch):
         enc = _make_encoder(tmp_path, codec="h264")  # nv12, so planes stay uint8
-        packed = torch.arange(24, dtype=torch.uint8, device=enc.device).reshape(6, 4)
+        # CPU storage is sufficient: this test mocks the GPU converter and DLPack.
+        packed = torch.arange(24, dtype=torch.uint8).reshape(6, 4)
+        enc._packed = torch.empty_like(packed)
         enc._converter = SimpleNamespace(
             sample_dtype=torch.uint8,
             uses_kernel=False,
@@ -703,6 +707,7 @@ class TestSharpening:
         enc.metadata = _fake_metadata(video_height=4, video_width=4)
         enc._cuda_ctx = None
         order = []
+        enc._packed = torch.empty((6, 4), dtype=torch.uint8)
         enc._cas = SimpleNamespace(
             sharpen_into=lambda source, destination: order.append(
                 ("sharpen", destination.is_contiguous())
@@ -849,6 +854,7 @@ class TestEncodeBuffer:
         enc.stream = MagicMock()
         enc.stream.cuda_stream = 1234
         enc._cuda_ctx = object()
+        enc._packed = torch.empty((3, 2), dtype=torch.int16)
         enc._lut_applier = None
         enc._converter = SimpleNamespace(
             sample_dtype=torch.int16,
