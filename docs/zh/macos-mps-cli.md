@@ -23,7 +23,7 @@ CLI 在解析完 `--device` 後才填入未指定的 defaults。Apple host 自�
 |detector|RF-DETR v6|RF-DETR v6|
 |secondary|none|none|
 
-MPS 的 explicit batch 只接受 1..2、clip 1..32，並保留 SessionConfig 的
+MPS 的 explicit batch 接受 1..4、clip 1..90（包含原專案的 batch 4／clip 90），並保留 SessionConfig 的
 `2 * temporal_overlap < max_clip_size` 等驗證；不會悄悄 clamp 使用者的值。
 FP16、TensorRT compile、HEVC／AV1、CQ、其他 detector、VR（含 auto）、LTX、
 secondary、streaming、segments、benchmark、supporter options 於啟動時拒絕。
@@ -152,3 +152,10 @@ NVIDIA／AMD CLI defaults、device context、CQ／AMF／NVENC、compiler／sessi
 installed CLI 短 fixture 觀察：decode/detect worker 約 2.0 s、primary restore 約 0.3 s，
 MPS driver memory sample peak 1764 MiB、offloads=0、結束 RSS 約 1243 MiB。
 這些時間／memory 只作觀察，不能外推為長片 benchmark 或品質保證。
+
+## 原專案 batch／clip 長影片追測
+
+2026-10-10 使用 batch4／clip90／overlap8 完整處理 16:38 長片，真實 MPS FP32，
+轉碼 1:52:25.63，實際 29859 frames，完整影音 decode 通過。保守 MPS 預設仍為1／16／2。
+詳細資源、swap、exact commands、tests、warnings 與畫質限制見
+[長影片實測紀錄](macos-mps-long-video-verification.md)。

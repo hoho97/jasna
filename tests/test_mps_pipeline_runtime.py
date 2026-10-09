@@ -170,12 +170,25 @@ def test_memory_monitor_uses_unified_budget_and_never_offloads(mps, monkeypatch,
 
 def test_mps_limits_preserve_explicit_clip_semantics(mps, source):
     p = pipeline_for(source, mps, positive_detector, TensorRestorer(mps))
-    for field, value in [("batch_size", 3), ("max_clip_size", 33)]:
+    for field, value in [("batch_size", 5), ("max_clip_size", 91)]:
         old = getattr(p, field)
         setattr(p, field, value)
         with pytest.raises(ValueError, match="MPS pipeline requires"):
             run_restoration_pass(p, None, Writer(), threading.Event(), seek_ts=None, use_async_secondary=False)
         setattr(p, field, old)
+    no_workers()
+
+
+def test_mps_pipeline_accepts_upstream_batch_clip_defaults(mps, source):
+    restorer = TensorRestorer(mps)
+    p = pipeline_for(source, mps, positive_detector, restorer, overlap=8)
+    p.batch_size, p.max_clip_size = 4, 90
+    writer = Writer()
+    assert run_restoration_pass(p, get_video_meta_data(str(source)), writer,
+                               threading.Event(), seek_ts=None, use_async_secondary=False) is None
+    assert (p.batch_size, p.max_clip_size, p.temporal_overlap) == (4, 90, 8)
+    assert len(writer.frames) == 36 and restorer.calls > 0
+    assert [pts for _, pts in writer.frames] == sorted({pts for _, pts in writer.frames})
     no_workers()
 
 

@@ -120,7 +120,7 @@ def test_explicit_values_survive_device_defaults(apple):
 
 
 @pytest.mark.parametrize("options", [
-    ["--fp16"], ["--compile-basicvsrpp"], ["--batch-size", "3"], ["--max-clip-size", "33"],
+    ["--fp16"], ["--compile-basicvsrpp"], ["--batch-size", "5"], ["--max-clip-size", "91"],
     ["--codec", "hevc"], ["--cq", "20"], ["--vr-mode", "auto"],
     ["--detection-model", "lada-yolo-v4"], ["--license-key", "test"],
     ["--secondary-restoration", "unet-4x"], ["--restoration-model-name", "ltx"],
@@ -164,3 +164,11 @@ def test_video_exit_and_post_export_contract(mode):
             assert run()
     assert signal.getsignal(signal.SIGINT) is original_sigint
     assert command.call_count == (1 if mode == "success" else 0)
+
+
+def test_mps_explicit_upstream_batch_clip_defaults(apple):
+    args = build_parser().parse_args(["--device", "mps", "--batch-size", "4",
+                                      "--max-clip-size", "90", "--temporal-overlap", "8"])
+    _validate_mps_cli_options(args)
+    assert (args.batch_size, args.max_clip_size, args.temporal_overlap) == (4, 90, 8)
+    assert args.fp16 is False and args.compile_basicvsrpp is False

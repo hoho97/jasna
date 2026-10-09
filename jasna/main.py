@@ -186,8 +186,8 @@ def _validate_mps_cli_options(args: argparse.Namespace) -> None:
         return
     if args.fp16 or args.compile_basicvsrpp:
         raise ValueError("Apple/MPS requires --no-fp16 and --no-compile-basicvsrpp (the MPS defaults).")
-    if not 1 <= args.batch_size <= 2 or not 1 <= args.max_clip_size <= 32:
-        raise ValueError("Apple/MPS requires --batch-size 1..2 and --max-clip-size 1..32.")
+    if not 1 <= args.batch_size <= 4 or not 1 <= args.max_clip_size <= 90:
+        raise ValueError("Apple/MPS requires --batch-size 1..4 and --max-clip-size 1..90.")
     if args.codec != "h264":
         raise ValueError("Apple/MPS currently supports --codec h264 software encoding only.")
     if args.vr_mode != "off":
