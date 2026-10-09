@@ -57,6 +57,15 @@ amd = [
   "transformers==5.1.0",
   "numpy==1.26.4",
 ]
+macos = [
+  # PyPI publishes native Apple Silicon wheels for this pair on Python 3.12/3.13.
+  # Keep the versions aligned with the known-good torch RF-DETR path used by AMD,
+  # but do not inherit AMD's ROCm runtime or its Python-3.12-only numpy pin.
+  "torch==2.12.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "torchvision==0.27.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "rfdetr==1.8.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "transformers==5.1.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+]
 dev = [
   "nuitka>=2.4",
   "pytest",
