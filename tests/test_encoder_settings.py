@@ -108,3 +108,13 @@ def test_cli_rejects_both_legacy_amf_cq_aliases() -> None:
             codec="hevc",
             vendor=AcceleratorVendor.AMD,
         )
+
+
+@pytest.mark.parametrize('vendor', [AcceleratorVendor.APPLE, AcceleratorVendor.CPU])
+def test_software_cli_uses_crf_without_injecting_cq(vendor):
+    assert _resolve_cli_encoder_settings('', cq=None, codec='h264', vendor=vendor) == {}
+    assert _resolve_cli_encoder_settings('crf=19,preset=slow', cq=None, codec='h264', vendor=vendor) == {'crf': 19, 'preset': 'slow'}
+    with pytest.raises(ValueError, match='--cq is a hardware'):
+        _resolve_cli_encoder_settings('', cq=25, codec='h264', vendor=vendor)
+    with pytest.raises(ValueError, match='Unsupported software encoder'):
+        _resolve_cli_encoder_settings('cq=25', cq=None, codec='h264', vendor=vendor)

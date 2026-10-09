@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Literal, Mapping
 
 import av
 import torch
@@ -163,8 +163,9 @@ AMF_SMART_FRAGMENT_OPTIONS = MappingProxyType({"forced_idr": "1"})
 @dataclass(frozen=True)
 class EncoderSpec:
     encoder_name: str
-    frame_format: str  # PyAV hardware-frame software format: "nv12" or "p010le"
+    frame_format: str  # Packed staging format: "nv12" or "p010le"
     default_options: Mapping[str, str]
+    backend: Literal["hardware", "software"] = "hardware"
 
     @property
     def ten_bit(self) -> bool:
@@ -206,6 +207,16 @@ AMF_ENCODER_SPECS: dict[str, EncoderSpec] = {
         default_options=MappingProxyType(DEFAULT_AMF_AV1_ENCODER_OPTIONS),
     ),
 }
+
+SOFTWARE_ENCODER_SPECS = {
+    "h264": EncoderSpec(
+        encoder_name="libx264",
+        frame_format="nv12",
+        default_options=MappingProxyType({"crf": "23", "preset": "medium"}),
+        backend="software",
+    ),
+}
+
 
 # ITU-T H.273 matrix, primaries, and transfer-characteristic code points.
 _COLOR_TAGS = {
@@ -390,6 +401,16 @@ def resolve_encoder_options(
     smart_fragment: bool,
 ) -> tuple[EncoderSpec, dict[str, str]]:
     """Pick the encoder spec and the final FFmpeg options for one output."""
+    if vendor in {AcceleratorVendor.APPLE, AcceleratorVendor.CPU}:
+        if smart_fragment:
+            raise ValueError("Software encoding does not support smart fragments")
+        if codec not in SOFTWARE_ENCODER_SPECS:
+            raise ValueError("Software encoding currently supports only 8-bit H.264")
+        validate_encoder_settings(encoder_settings, codec=codec, vendor=vendor)
+        spec = SOFTWARE_ENCODER_SPECS[codec]
+        return spec, dict(spec.default_options) | {
+            k: _option_value(v) for k, v in encoder_settings.items()
+        }
     specs = AMF_ENCODER_SPECS if vendor is AcceleratorVendor.AMD else ENCODER_SPECS
     if codec not in specs:
         raise ValueError(f"Unsupported codec: {codec}")
@@ -453,13 +474,18 @@ class VideoEncoder:
     ):
         self.device = torch.device(device)
         self.vendor = vendor_for_device(self.device)
-        if self.vendor not in {AcceleratorVendor.NVIDIA, AcceleratorVendor.AMD}:
-            raise RuntimeError(
-                f"GPU video encoding is not supported on {self.vendor.value}"
-            )
         spec, self.encoder_options = resolve_encoder_options(
             self.vendor, codec, metadata, encoder_settings, smart_fragment=smart_fragment
         )
+        self._software = spec.backend == "software"
+        # Software encoding owns host RGB snapshots; keep color/postprocessing
+        # in the encoder worker on CPU, without concurrent MPS command encoders.
+        self._frame_device = torch.device("cpu") if self._software else self.device
+        if self._software:
+            if metadata.is_10bit or metadata.color_transfer.lower() in {"smpte2084", "arib-std-b67"}:
+                raise ValueError("Software encoding currently supports only 8-bit SDR input")
+            if metadata.video_width % 2 or metadata.video_height % 2:
+                raise ValueError("H.264 4:2:0 software encoding requires even dimensions")
         color_variant = _COLOR_VARIANTS.get((metadata.color_space, metadata.color_range))
         if color_variant is None:
             raise ValueError(f"Unsupported color space or color range: {metadata.color_space} {metadata.color_range}")
@@ -479,24 +505,35 @@ class VideoEncoder:
         self._lut_applier: GpuLutApplier | None = None
         if lut_path:
             lut = parse_cube_file(lut_path)
-            self._lut_applier = GpuLutApplier(lut, device)
+            self._lut_applier = GpuLutApplier(lut, self._frame_device)
 
         self._cas: GpuCasSharpener | None = None
         if sharpen_strength > 0.0:
             self._cas = GpuCasSharpener(
-                sharpen_strength, ten_bit=spec.ten_bit, device=self.device
+                sharpen_strength, ten_bit=spec.ten_bit, device=self._frame_device
             )
 
-        self._converter = RgbToYuvConverter(f"{pixel_format}_{color_variant}", device=self.device)
+        self._converter = RgbToYuvConverter(f"{pixel_format}_{color_variant}", device=self._frame_device)
 
         self._lut_flags: deque[bool] = deque()
-        # Only AMD reuses one packed frame (set in __enter__); NVENC still holds
+        # AMD and software reuse one packed frame (set in __enter__); NVENC holds
         # its input frame after encode() returns, so NVIDIA allocates per frame.
         self._packed: torch.Tensor | None = None
         self._cas_luma: torch.Tensor | None = None
         self._source_chapters = ()
 
     def __enter__(self):
+        try:
+            return self._open()
+        except Exception:
+            # Context managers do not call __exit__ when __enter__ fails.
+            for name in ("dst", "_src"):
+                container = getattr(self, name, None)
+                if container is not None:
+                    container.close()
+            raise
+
+    def _open(self):
         try:
             av.Codec(self.encoder_name, "w")
         except ValueError as exc:  # av.codec.codec.UnknownCodecError
@@ -524,6 +561,8 @@ class VideoEncoder:
                 is_hw_owned=False,
             )
             pix_fmt = self.spec.frame_format
+        elif self._software:
+            pix_fmt = "yuv420p"
         else:
             pix_fmt = "cuda"
         out_v = self.dst.add_stream(self.encoder_name, **stream_kwargs)
@@ -579,19 +618,20 @@ class VideoEncoder:
                 cuda_stream=self.stream.cuda_stream,
             )
         else:
-            self.stream = current_stream(self.device)
+            self.stream = current_stream(self._frame_device)
             self._packed = torch.empty(
                 (height + height // 2, width),
                 dtype=self._converter.sample_dtype,
-                device=self.device,
+                device=self._frame_device,
             )
             if self._cas is not None:
                 self._cas_luma = torch.empty_like(self._packed[:height])
-            self._host_yuv = torch.empty(
-                (height + height // 2, width),
-                dtype=torch.uint16 if self.spec.ten_bit else torch.uint8,
-                pin_memory=True,
-            )
+            if not self._software:
+                self._host_yuv = torch.empty(
+                    (height + height // 2, width),
+                    dtype=torch.uint16 if self.spec.ten_bit else torch.uint8,
+                    pin_memory=True,
+                )
         self.pts_heap: list[int] = []
         self.frame_buffer: deque = deque()
         self._lut_flags.clear()
@@ -770,7 +810,11 @@ class VideoEncoder:
             raise self._worker_error
 
     def _encode_worker(self):
-        set_device(self.device)
+        try:
+            set_device(self.device)
+        except Exception as exc:
+            # Still drain the queue so close() cannot deadlock on task_done().
+            self._worker_error = exc
 
         while True:
             item = self._encode_queue.get()
@@ -779,8 +823,9 @@ class VideoEncoder:
                     return
                 if self._worker_error is None:
                     frame, pts, apply_lut, ready_event = item
-                    self.stream.wait_event(ready_event)
-                    frame.record_stream(self.stream)
+                    if ready_event is not None:
+                        self.stream.wait_event(ready_event)
+                        frame.record_stream(self.stream)
                     self._encode_frame(frame, pts, apply_lut=apply_lut)
             except Exception as exc:
                 self._worker_error = exc
@@ -794,6 +839,8 @@ class VideoEncoder:
         pts: int,
         apply_lut: bool,
     ) -> tuple[torch.Tensor, int, bool, object]:
+        if self._software:
+            return frame, pts, apply_lut, None
         producer_stream = current_stream(self.device)
         ready_event = new_event(self.device)
         producer_stream.record_event(ready_event)
@@ -1036,6 +1083,12 @@ class VideoEncoder:
                 planes,
                 format=self.spec.frame_format,
             )
+        if self._software:
+            # PyAV copies the reusable CPU packed buffer into owned planes;
+            # libx264 may retain them while it delays B-frames.
+            hw_frame = av.VideoFrame.from_ndarray(
+                packed.numpy(), format="nv12"
+            ).reformat(format="yuv420p")
         hw_frame.pts = pts
         hw_frame.time_base = self.metadata.time_base
         try:
@@ -1050,6 +1103,19 @@ class VideoEncoder:
     def encode(self, frame: torch.Tensor, pts: int, *, apply_lut: bool = True):
         if self._worker_error is not None:
             raise self._worker_error
+        if self._software:
+            if (
+                frame.device.type != self.device.type
+                or (self.device.index is not None and frame.device.index != self.device.index)
+                or frame.dtype != torch.uint8
+                or tuple(frame.shape) != (3, self.metadata.video_height, self.metadata.video_width)
+            ):
+                raise ValueError("Software encoder expects a device-matching uint8 CHW RGB frame")
+            # Own the snapshot before returning: callers reuse decoder/blend
+            # buffers while both the reorder buffer and worker queue retain it.
+            frame = frame.detach().to(
+                "cpu", non_blocking=False, copy=True, memory_format=torch.contiguous_format
+            )
         pts = int(pts) - self.pts_origin
         while pts in self.pts_set:
             pts += 1
