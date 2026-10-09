@@ -97,7 +97,7 @@ def test_smart_run_processes_only_render_spans_and_assembles_full_output(tmp_pat
     mux.assert_called_once()
 
 
-def test_smart_run_uses_working_dir_for_temp_files(tmp_path) -> None:
+def test_smart_run_uses_working_dir_for_temp_files(tmp_path, nvidia_build) -> None:
     pipeline = object.__new__(Pipeline)
     pipeline.restoration_model_name = "basicvsrpp"
     pipeline.ltx_seed = 0
