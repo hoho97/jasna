@@ -6,6 +6,7 @@ from queue import Queue
 
 import torch
 
+from jasna.accelerator import execution_context, synchronize_handoff
 from jasna.blend_buffer import BlendBuffer
 from jasna.crop_buffer import CropBuffer, RawCrop, extract_crop
 from jasna.mosaic.detections import Detections
@@ -114,6 +115,7 @@ def _process_ended_clips(
             keep_end=int(keep_end),
             crossfade_weights=crossfade_weights,
         )
+        synchronize_handoff(item.raw_crops[0].crop.device)
         clip_queue.put(item, frame_count=int(keep_end) - int(keep_start))
 
 
@@ -140,9 +142,10 @@ def process_frame_batch(
     if effective_bs == 0:
         return BatchProcessResult(next_frame_idx=int(start_frame_idx), clips_emitted=0)
 
-    frames_eff = frames[:effective_bs]
-    scene_cuts = scene_detector.find_cuts(frames_eff) if scene_detector is not None else frozenset()
-    detections: Detections = detections_fn(frames_eff, target_hw=target_hw)
+    with execution_context(frames.device):
+        frames_eff = frames[:effective_bs]
+        scene_cuts = scene_detector.find_cuts(frames_eff) if scene_detector is not None else frozenset()
+        detections: Detections = detections_fn(frames_eff, target_hw=target_hw)
     _, frame_h, frame_w = frames_eff[0].shape
 
     clips_emitted = 0
@@ -155,7 +158,8 @@ def process_frame_batch(
         valid_masks = detections.masks[i]
 
         scene_cut_clips = tracker.flush() if i in scene_cuts else []
-        ended_clips, active_track_ids = tracker.update(current_frame_idx, valid_boxes, valid_masks)
+        with execution_context(frames.device):
+            ended_clips, active_track_ids = tracker.update(current_frame_idx, valid_boxes, valid_masks)
         ended_clips = scene_cut_clips + ended_clips
 
         blend_buffer.register_frame(current_frame_idx, active_track_ids)
@@ -212,12 +216,13 @@ def _extract_region_crop(
     crop_eye_width: int | None,
     vr_projector,
 ) -> RawCrop:
-    x_bounds = _eye_bounds(bbox, crop_eye_width, frame_w)
-    if vr_projector is not None:
-        return vr_projector.extract_region_crop(
-            frame, bbox, frame_h, frame_w, x_bounds=x_bounds
-        )
-    return extract_crop(frame, bbox, frame_h, frame_w, x_bounds=x_bounds)
+    with execution_context(frame.device):
+        x_bounds = _eye_bounds(bbox, crop_eye_width, frame_w)
+        if vr_projector is not None:
+            return vr_projector.extract_region_crop(
+                frame, bbox, frame_h, frame_w, x_bounds=x_bounds
+            )
+        return extract_crop(frame, bbox, frame_h, frame_w, x_bounds=x_bounds)
 
 
 def _eye_bounds(

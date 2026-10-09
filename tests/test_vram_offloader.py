@@ -113,7 +113,7 @@ class TestVramOffloaderOffload:
             vram_limit=0.001,
             safetynet=0,
         )
-        # device_type stays "cuda" (default) so CPU tensors are not considered on-device
+        # CPU monitoring does not select resident CPU tensors for offload
         freed = offloader._offload(1)
         assert freed == 0
 
@@ -223,7 +223,7 @@ class TestVramOffloaderLifecycle:
         assert not offloader._thread.is_alive()
 
     @patch("jasna.vram_offloader.torch.cuda.mem_get_info", return_value=(0, 2_000_000))
-    @patch("jasna.vram_offloader.torch.cuda.empty_cache")
+    @patch("jasna.vram_offloader.empty_cache")
     def test_run_loop_triggers_offload_and_empty_cache(self, mock_empty_cache, mock_mem_info):
         bb = BlendBuffer(device=torch.device("cpu"))
         sr = _make_sr(track_id=1, start_frame=0, frame_count=1)
@@ -231,7 +231,7 @@ class TestVramOffloaderLifecycle:
         bb.add_result(sr)
 
         offloader = VramOffloader(
-            device=torch.device("cpu"),
+            device=torch.device("cuda:0"),
             blend_buffer=bb,
             crop_buffers={},
             vram_limit=0.001,
@@ -361,3 +361,31 @@ class TestBlendBufferOffloadableResults:
     def test_empty_when_no_results(self):
         bb = BlendBuffer(device=torch.device("cpu"))
         assert bb.offloadable_results() == []
+
+
+@pytest.mark.parametrize("hip,cuda", [(None, "13.0"), ("7.2", None)])
+def test_cuda_and_rocm_keep_memory_and_overlap_contract(monkeypatch, hip, cuda):
+    from jasna.accelerator import execution_context, set_device, synchronize_handoff
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.version, "cuda", cuda)
+    device = torch.device("cuda:0")
+    select = MagicMock()
+    sync = MagicMock(side_effect=AssertionError("unexpected CUDA/ROCm handoff sync"))
+    monkeypatch.setattr(torch.cuda, "set_device", select)
+    monkeypatch.setattr(torch.cuda, "synchronize", sync)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: MagicMock(total_memory=8 * 1024 ** 3))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (2 * 1024 ** 3, 8 * 1024 ** 3))
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda _: 1024 ** 3)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda _: 2 * 1024 ** 3)
+    monitor = VramOffloader(device, BlendBuffer(torch.device("cpu")), {}, safetynet=0)
+    assert monitor._threshold == 8 * 1024 ** 3 and monitor._offload_device_type == "cuda"
+    set_device(device)
+    select.assert_called_once_with(device)
+    with execution_context(device):
+        synchronize_handoff(device)
+    sync.assert_not_called()
+    monitor.start()
+    import time
+    time.sleep(.15)
+    monitor.stop()
+    assert monitor.stats.min_bytes == 6 * 1024 ** 3 and not monitor.errors

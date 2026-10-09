@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import os
+import threading
 from typing import Any
 
 import torch
@@ -278,3 +279,53 @@ def device_name(device: torch.device | str) -> str:
         get_name = getattr(backend, "get_name", None)
         return str(get_name()) if get_name is not None else "Apple MPS"
     return str(device_module(resolved).get_device_name(resolved))
+
+
+_MPS_EXECUTION_LOCK = threading.RLock()
+
+
+@contextmanager
+def execution_context(device: torch.device | str):
+    """Serialize MPS submission/completion; never hold this across queue waits.
+
+    MPS command-buffer commit and concurrent Python submission can race even
+    with one default stream. CUDA/ROCm keep their existing overlap unchanged.
+    The lock is process-wide because every MPS worker shares that stream.
+    """
+    if torch.device(device).type == "mps":
+        with _MPS_EXECUTION_LOCK:
+            try:
+                yield
+            finally:
+                synchronize(device)
+    else:
+        yield
+
+
+def synchronize_handoff(device: torch.device | str) -> None:
+    """Finish MPS work before publishing owned tensors to another worker."""
+    with execution_context(device):
+        pass
+
+
+def memory_summary(device: torch.device | str) -> str:
+    resolved = torch.device(device)
+    mib = 1024 ** 2
+    if resolved.type == "mps":
+        _require_mps_available()
+        return (
+            f"MPS unified memory: allocated={torch.mps.current_allocated_memory() / mib:.0f} MiB"
+            f" driver={torch.mps.driver_allocated_memory() / mib:.0f} MiB"
+            f" recommended_budget={torch.mps.recommended_max_memory() / mib:.0f} MiB"
+            " (budget is not free VRAM)"
+        )
+    if resolved.type == "cpu":
+        return "CPU: no dedicated accelerator memory"
+    free, total = mem_get_info(resolved)
+    module = device_module(resolved)
+    return (
+        f"VRAM: used={(total - free) / mib:.0f} MiB"
+        f" allocated={module.memory_allocated(resolved) / mib:.0f} MiB"
+        f" reserved={module.memory_reserved(resolved) / mib:.0f} MiB"
+        f" free={free / mib:.0f} MiB"
+    )

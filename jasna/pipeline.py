@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import psutil
 import torch
 
-from jasna.accelerator import AcceleratorVendor, vendor_for_device
+from jasna.accelerator import AcceleratorVendor, capabilities_for_device, device_module, memory_summary, vendor_for_device
 from jasna.media.container_utils import MOV_SUFFIXES
 from jasna.media.probe import UnsupportedColorspaceError, get_video_meta_data
 from jasna.media.video_encoder import VideoEncoder
@@ -195,8 +195,7 @@ class Pipeline:
         finally:
             frame_writer.close()
 
-        free, total = torch.cuda.mem_get_info(self.device)
-        log.info("VRAM usage at end — %.1f MiB", (total - free) / (1024 ** 2))
+        log.info("Memory at end — %s", memory_summary(self.device))
         log.info("RAM usage at end — %.1f MiB", psutil.Process(os.getpid()).memory_info().rss / (1024 ** 2))
         if error is not None:
             error.__traceback__ = None
@@ -292,6 +291,8 @@ class Pipeline:
         return Progress(frames, disable=self.disable_progress, report=report)
 
     def _require_ltx_video(self) -> None:
+        if not capabilities_for_device(self.device).ltx:
+            raise ValueError("LTX restoration is not supported on this accelerator")
         if self.vr_resolution.is_sbs:
             raise ValueError("LTX restoration does not support VR180 side-by-side video")
 
@@ -346,7 +347,7 @@ class Pipeline:
             frame_w=int(metadata.video_width),
             batch_size=self.batch_size,
             large_canvas=segment_large_canvas(
-                self.ltx_large_canvas, torch.cuda.get_device_properties(self.device).total_memory
+                self.ltx_large_canvas, device_module(self.device).get_device_properties(self.device).total_memory
             ),
             budget=segment_decode_budget,
             device=self.device,

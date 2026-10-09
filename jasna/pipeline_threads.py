@@ -10,7 +10,7 @@ from typing import Protocol
 
 import torch
 
-from jasna.accelerator import empty_cache, ipc_collect
+from jasna.accelerator import empty_cache, execution_context, ipc_collect, set_device, synchronize_handoff
 from jasna.blend_buffer import BlendBuffer
 from jasna.crop_buffer import CropBuffer
 from jasna.frame_queue import FrameQueue
@@ -32,6 +32,18 @@ log = logging.getLogger(__name__)
 class FrameWriter(Protocol):
     def write(self, frame: torch.Tensor, pts: int, *, apply_lut: bool = True) -> None: ...
     def after_write(self, frames_written: int) -> None: ...
+
+
+def _completed_batches(reader, device, seek_ts):
+    batches = iter(reader.frames(seek_ts=seek_ts))
+    while True:
+        with execution_context(device):
+            try:
+                batch = next(batches)
+            except StopIteration:
+                return
+        # The execution lock must be released before the caller can queue/block.
+        yield batch
 
 
 def decode_detect_loop(
@@ -66,7 +78,7 @@ def decode_detect_loop(
 ) -> None:
     timer = LoopTimer("decode-detect")
     try:
-        torch.cuda.set_device(device)
+        set_device(device)
         tracker = ClipTracker(
             max_clip_size=max_clip_size,
             temporal_overlap=temporal_overlap,
@@ -129,7 +141,7 @@ def decode_detect_loop(
             )
 
             try:
-                for frames, pts_list in timer.timed_iter(reader.frames(seek_ts=seek_ts), "decode"):
+                for frames, pts_list in timer.timed_iter(_completed_batches(reader, device, seek_ts), "decode"):
                     if cancel_event.is_set():
                         break
                     if end_pts is not None:
@@ -235,7 +247,7 @@ def primary_restore_loop(
 ) -> None:
     timer = LoopTimer("primary")
     try:
-        torch.cuda.set_device(device)
+        set_device(device)
         log.debug("[primary] thread starting")
         while not cancel_event.is_set():
             primary_idle_event.set()
@@ -248,7 +260,7 @@ def primary_restore_loop(
             if item is _SENTINEL:
                 break
             clip_item: ClipRestoreItem = item
-            with timer.measure("restore"):
+            with timer.measure("restore"), execution_context(device):
                 result = restoration_pipeline.prepare_and_run_primary(
                     clip_item.clip,
                     clip_item.raw_crops,
@@ -259,6 +271,7 @@ def primary_restore_loop(
                 )
                 if restoration_pipeline.secondary_prefers_cpu_input:
                     result.primary_raw = result.primary_raw.cpu()
+            synchronize_handoff(device)
             with timer.measure("queue-put"):
                 secondary_queue.put(result, frame_count=result.keep_end - result.keep_start)
             debug_memory.snapshot(
@@ -287,7 +300,7 @@ def secondary_restore_loop(
 ) -> None:
     timer = LoopTimer("secondary")
     try:
-        torch.cuda.set_device(device)
+        set_device(device)
         log.debug("[secondary] thread starting")
         while not cancel_event.is_set():
             try:
@@ -298,7 +311,7 @@ def secondary_restore_loop(
             if item is _SENTINEL:
                 break
             pr: PrimaryRestoreResult = item
-            with timer.measure("restore"):
+            with timer.measure("restore"), execution_context(device):
                 restored_frames = restoration_pipeline._run_secondary(
                     pr.primary_raw,
                     pr.keep_start,
@@ -306,6 +319,7 @@ def secondary_restore_loop(
                 )
                 del pr.primary_raw
                 sr = restoration_pipeline.build_secondary_result(pr, restored_frames)
+            synchronize_handoff(device)
             with timer.measure("queue-put"):
                 encode_queue.put(sr, frame_count=sr.keep_end)
             debug_memory.snapshot(
@@ -340,10 +354,10 @@ def blend_encode_loop(
 ) -> None:
     timer = LoopTimer("blend-encode")
     try:
-        torch.cuda.set_device(device)
+        set_device(device)
 
         def _flat_frames(rdr: VideoReader):
-            for batch, pts in rdr.frames(seek_ts=seek_ts):
+            for batch, pts in _completed_batches(rdr, device, seek_ts):
                 for i in range(len(pts)):
                     yield batch[i]
 
@@ -401,7 +415,7 @@ def blend_encode_loop(
                         except Empty:
                             pass
 
-                with timer.measure("blend"):
+                with timer.measure("blend"), execution_context(device):
                     if not meta.apply_effect:
                         blended = original_frame
                     else:
@@ -409,7 +423,7 @@ def blend_encode_loop(
                             meta.frame_idx,
                             original_frame,
                         )
-                with timer.measure("write"):
+                with timer.measure("write"), execution_context(device):
                     if meta.apply_effect:
                         frame_writer.write(blended, meta.pts)
                     else:
@@ -605,7 +619,7 @@ def async_secondary_restore_loop(
     debug_memory: PipelineDebugMemoryLogger,
 ) -> None:
     try:
-        torch.cuda.set_device(device)
+        set_device(device)
         stats = run_async_secondary(
             restoration_pipeline=restoration_pipeline,
             secondary_queue=secondary_queue,
@@ -656,6 +670,13 @@ def run_restoration_pass(
     restoration_pipeline = pipeline.restoration_pipeline
     max_clip_size = pipeline.max_clip_size
     secondary_workers = max(1, int(restoration_pipeline.secondary_num_workers))
+    if device.type == "mps":
+        # Explicit P0 envelope, rather than silently changing clip/overlap semantics.
+        if not 1 <= pipeline.batch_size <= 2 or not 1 <= max_clip_size <= 32:
+            raise ValueError("MPS pipeline requires batch_size=1..2 and max_clip_size=1..32; "
+                             "use a small clip and temporal_overlap < max_clip_size/2")
+        if use_async_secondary:
+            raise ValueError("MPS pipeline does not support async secondary restoration")
 
     clip_queue = FrameQueue(max_frames=max_clip_size)
     secondary_queue = FrameQueue(max_frames=max_clip_size * secondary_workers)
@@ -763,28 +784,44 @@ def run_restoration_pass(
         ),
     ]
     vram_offloader.start()
-    for thread in threads:
-        thread.start()
+    started_threads = []
+    try:
+        for thread in threads:
+            thread.start()
+            started_threads.append(thread)
 
-    while any(thread.is_alive() for thread in threads):
-        if poll is not None and poll():
+        while any(thread.is_alive() for thread in threads):
+            if error_holder or vram_offloader.errors:
+                cancel_event.set()
+            if poll is not None and poll():
+                cancel_event.set()
+            if cancel_event.wait(0.05):
+                break
+    finally:
+        # Also handles poll/startup exceptions. Drain only after cancellation or
+        # completion: draining a live normal pass would discard valid results.
+        if any(t.is_alive() for t in started_threads):
             cancel_event.set()
-        if cancel_event.wait(0.05):
-            break
+        for thread in started_threads:
+            while thread.is_alive():
+                _drain(queues)
+                thread.join(timeout=0.02)
+        vram_offloader.stop()
+        error_holder.extend(vram_offloader.errors)
+        # Drop queue/buffer owners before releasing the allocator cache, including
+        # on poll/startup exceptions. No worker can access these after its join.
+        _drain(queues)
+        crop_buffers.clear()
+        del queues, clip_queue, secondary_queue, encode_queue, metadata_queue
+        del blend_buffer, crop_buffers, threads, started_threads
+        del debug_memory, vram_offloader, secondary_kwargs, secondary_target
+        gc.collect()
+        with execution_context(device):
+            synchronize_handoff(device)
+            empty_cache(device)
+            ipc_collect(device)
 
-    for thread in threads:
-        while thread.is_alive():
-            _drain(queues)
-            thread.join(timeout=0.02)
-    vram_offloader.stop()
-
-    error = error_holder[0] if error_holder else None
-    del queues, clip_queue, secondary_queue, encode_queue, metadata_queue
-    del blend_buffer, crop_buffers, threads
-    gc.collect()
-    empty_cache(device)
-    ipc_collect(device)
-    return error
+    return error_holder[0] if error_holder else None
 
 
 def _drain(queues) -> None:

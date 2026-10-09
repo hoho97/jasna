@@ -7,6 +7,9 @@ import time
 import traceback
 
 import torch
+import psutil
+
+from jasna.accelerator import device_module, empty_cache, mem_get_info, memory_summary
 
 from jasna.blend_buffer import BlendBuffer
 from jasna.crop_buffer import CropBuffer
@@ -46,11 +49,11 @@ class VramStats:
             return 0.0
         return self.sum_bytes / self.sample_count
 
-    def summary(self) -> str:
+    def summary(self, label: str = "VRAM") -> str:
         if self.sample_count == 0:
-            return "VRAM offloader: no samples"
+            return f"{label} monitor: no samples"
         return (
-            f"VRAM — min: {self.min_bytes / _MIB:.0f} MiB, "
+            f"{label} — min: {self.min_bytes / _MIB:.0f} MiB, "
             f"max: {self.max_bytes / _MIB:.0f} MiB, "
             f"avg: {self.avg_bytes / _MIB:.0f} MiB | "
             f"offloads: {self.offload_count}, "
@@ -71,12 +74,23 @@ class VramOffloader:
         self._blend_buffer = blend_buffer
         self._crop_buffers = crop_buffers
 
-        if vram_limit is not None:
-            gpu_total = int(vram_limit * 1024 * 1024 * 1024)
+        self._mps = device.type == "mps"
+        self.errors: list[BaseException] = []
+        if self._mps:
+            # Unified memory is shared with macOS and CPU tensors. Neither the
+            # working-set recommendation nor host available bytes is free VRAM.
+            host = psutil.virtual_memory()
+            gpu_total = min(int(torch.mps.recommended_max_memory() * 0.75), host.total // 2)
+            if vram_limit is not None:
+                gpu_total = min(gpu_total, int(vram_limit * 1024 ** 3))
+        elif vram_limit is not None:
+            gpu_total = int(vram_limit * 1024 ** 3)
+        elif device.type == "cpu":
+            gpu_total = psutil.virtual_memory().total
         else:
-            gpu_total = torch.cuda.get_device_properties(device).total_memory
+            gpu_total = device_module(device).get_device_properties(device).total_memory
         self._threshold = max(0, gpu_total - safetynet)
-        self._offload_device_type = "cuda"
+        self._offload_device_type = device.type if device.type != "cpu" else None
 
         self.stats = VramStats()
         self._stop = threading.Event()
@@ -88,8 +102,9 @@ class VramOffloader:
         self._metadata_queue: object | None = None
 
         _log.info(
-            "VramOffloader: threshold=%d MiB (total=%d MiB, safetynet=%d MiB)",
+            "Memory monitor: threshold=%d MiB (%s=%d MiB, safetynet=%d MiB)",
             self._threshold // _MIB,
+            "unified safety budget" if self._mps else "total",
             gpu_total // _MIB,
             safetynet // _MIB,
         )
@@ -117,26 +132,41 @@ class VramOffloader:
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=5.0)
-        _log.info(self.stats.summary())
+        _log.info(self.stats.summary("MPS driver unified memory" if self._mps else "VRAM"))
 
     def _run(self) -> None:
-        while not self._stop.wait(_POLL_INTERVAL):
-            free, total = torch.cuda.mem_get_info(self._device)
-            used = total - free
-            self.stats.update(used)
-            if used > self._threshold:
-                freed = self._offload(used - self._threshold)
-                if freed > 0:
-                    torch.cuda.empty_cache()
-                    self.stats.offload_count += 1
-                    self.stats.total_offloaded_bytes += freed
-                    _log.debug(
-                        "[vram-offloader] offloaded %.1f MiB (used=%.0f MiB, threshold=%.0f MiB)",
-                        freed / _MIB,
-                        used / _MIB,
-                        self._threshold / _MIB,
-                    )
-            self._check_encode_stall()
+        try:
+            while not self._stop.is_set():
+                if self._mps:
+                    used = torch.mps.driver_allocated_memory()
+                    self.stats.update(used)
+                    host = psutil.virtual_memory()
+                    if used > self._threshold or host.available < max(VRAM_SAFETYNET, host.total // 20):
+                        raise RuntimeError(
+                            "MPS unified-memory safety budget exceeded; reduce batch_size/max_clip_size "
+                            f"or close other applications. {memory_summary(self._device)}; "
+                            f"safety_budget={self._threshold / _MIB:.0f} MiB "
+                            f"host_available={host.available / _MIB:.0f} MiB"
+                        )
+                elif self._device.type != "cpu":
+                    free, total = mem_get_info(self._device)
+                    used = total - free
+                    self.stats.update(used)
+                    if used > self._threshold:
+                        freed = self._offload(used - self._threshold)
+                        if freed > 0:
+                            empty_cache(self._device)
+                            self.stats.offload_count += 1
+                            self.stats.total_offloaded_bytes += freed
+                            _log.debug(
+                                "[vram-offloader] offloaded %.1f MiB (used=%.0f MiB, threshold=%.0f MiB)",
+                                freed / _MIB, used / _MIB, self._threshold / _MIB,
+                            )
+                self._check_encode_stall()
+                self._stop.wait(_POLL_INTERVAL)
+        except BaseException as error:
+            _log.exception("Memory monitor failed")
+            self.errors.append(error)
 
     def pause_stall_check(self) -> None:
         self._stall_check_paused = True
@@ -172,13 +202,7 @@ class VramOffloader:
         crop_sizes = {k: v.frame_count for k, v in list(self._crop_buffers.items())}
         lines.append(f"  crop_buffers: track_ids={list(crop_sizes)} sizes={crop_sizes}")
 
-        free, total = torch.cuda.mem_get_info(self._device)
-        lines.append(
-            f"  VRAM: used={((total - free) / _MIB):.0f} MiB"
-            f" allocated={torch.cuda.memory_allocated(self._device) / _MIB:.0f} MiB"
-            f" reserved={torch.cuda.memory_reserved(self._device) / _MIB:.0f} MiB"
-            f" free={free / _MIB:.0f} MiB"
-        )
+        lines.append(f"  {memory_summary(self._device)}")
 
         lines.append("  --- Thread stacks ---")
         thread_names = {t.ident: t.name for t in threading.enumerate()}
@@ -193,6 +217,11 @@ class VramOffloader:
         _log.warning("\n".join(lines))
 
     def _offload(self, bytes_to_free: int) -> int:
+        # MPS P0 deliberately disables background mutations of shared tensors.
+        # Moving them to CPU would still consume the same unified memory and
+        # race restoration/blending; bounded queues + pressure cancellation win.
+        if self._mps:
+            return 0
         freed = 0
 
         results = self._blend_buffer.offloadable_results()
