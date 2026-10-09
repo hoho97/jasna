@@ -152,6 +152,7 @@ class TestYoloCall:
         assert masks[0].sum().item() == 4
         assert masks[0, 1:3, 1:3].all()
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires real CUDA tensor operations")
     def test_call_no_detections(self):
         model, mock_runner = _build_yolo_model(batch_size=1, imgsz=640)
 
@@ -168,6 +169,7 @@ class TestYoloCall:
         assert len(det.masks) == 1
         mock_runner.infer.assert_called_once()
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires real CUDA tensor operations")
     def test_call_with_detections(self):
         model, mock_runner = _build_yolo_model(batch_size=1, imgsz=640)
 
@@ -323,3 +325,15 @@ class TestYoloAutoBackendCall:
 
         assert scores.shape == (1,)
         assert masks.shape == (1, 90, 160)
+
+
+@pytest.fixture(autouse=True)
+def _nvidia_runner_default(monkeypatch):
+    # TRT runner doubles need explicit NVIDIA identity on non-CUDA hosts.
+    monkeypatch.setattr(torch.version, "cuda", "test-nvidia")
+    monkeypatch.setattr(torch.version, "hip", None)
+    # Initialization tests mock the TRT runner; fused CUDA preprocessing is a
+    # separate boundary and must not allocate CUDA tensors on this host.
+    if not torch.cuda.is_available():
+        from types import SimpleNamespace
+        monkeypatch.setattr("jasna.mosaic.yolo.ResizeNormalizer", lambda **kwargs: SimpleNamespace(available=False))

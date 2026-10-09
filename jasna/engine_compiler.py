@@ -55,7 +55,7 @@ def _detection_engine_exists(
 ) -> bool:
     import torch
 
-    from jasna.accelerator import is_amd_device
+    from jasna.accelerator import is_amd_device, is_apple_device
     from jasna.mosaic.detection_registry import (
         is_rfdetr_model,
         is_yolo_model,
@@ -63,6 +63,12 @@ def _detection_engine_exists(
     )
 
     resolved_device = torch.device(device)
+    if is_apple_device(resolved_device):
+        from jasna.model_weights import validate_weights_path
+
+        validate_weights_path(detection_model_path, suffix=".pt", model="Apple/MPS detector")
+        # Eager PyTorch has no generated engine. Never probe/reuse NVIDIA caches.
+        return True
     if is_amd_device(resolved_device):
         # AMD runs both RF-DETR (rfdetr torch model) and YOLO through PyTorch;
         # there is no compiled engine artifact to check for.

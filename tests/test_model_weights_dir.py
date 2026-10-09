@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import sys
 from pathlib import Path
 
@@ -55,3 +57,23 @@ def test_discover_available_detection_models_explicit_dir_overrides(tmp_path: Pa
 
     names = detection_registry.discover_available_detection_models(weights_dir)
     assert names == ["rfdetr-v3"]
+
+
+@pytest.fixture(autouse=True)
+def _nvidia_registry_default(monkeypatch):
+    # These legacy cases exercise ONNX discovery. Apple cases override this fixture.
+    monkeypatch.delenv("JASNA_MODEL_WEIGHTS_DIR", raising=False)
+    monkeypatch.setattr("jasna.mosaic.detection_registry.is_apple_device", lambda: False)
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_weights_override_precedes_defaults(monkeypatch, tmp_path, frozen):
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setenv("JASNA_MODEL_WEIGHTS_DIR", str(tmp_path))
+    assert model_weights_dir() == tmp_path
+    assert engine_paths.default_restoration_model_path("basicvsrpp").parent == tmp_path
+
+
+def test_weights_override_expands_home(monkeypatch):
+    monkeypatch.setenv("JASNA_MODEL_WEIGHTS_DIR", "~/jasna-weights")
+    assert model_weights_dir() == Path.home() / "jasna-weights"

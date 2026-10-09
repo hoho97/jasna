@@ -44,3 +44,19 @@ def hidpi(request):
 def no_gpu_cleanup(monkeypatch):
     """Skip the per-job torch cleanup: it initializes CUDA, which can outlast thread joins in a busy run."""
     monkeypatch.setattr("jasna.gui.processor._cleanup_torch", lambda torch_mod: None)
+
+
+@pytest.fixture
+def nvidia_trt_compiler(monkeypatch):
+    # Mock the external TensorRT boundary without requiring its platform wheel.
+    # Keep the original compile arguments/assertions, including workspace size.
+    import sys
+    from types import ModuleType
+    from unittest.mock import MagicMock
+    import torch
+
+    monkeypatch.setattr(torch.version, "cuda", "test-nvidia")
+    monkeypatch.setattr(torch.version, "hip", None)
+    module = ModuleType("jasna.trt")
+    module.compile_onnx_to_tensorrt_engine = MagicMock()
+    monkeypatch.setitem(sys.modules, "jasna.trt", module)

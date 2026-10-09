@@ -8,6 +8,7 @@ import torch
 from mmengine.config import Config
 from mmengine.runner import load_checkpoint
 
+from jasna.model_weights import load_restoration_state_dict
 from jasna.models.basicvsrpp import register_all_modules
 from jasna.models.basicvsrpp.basicvsrpp_gan import BasicVSRPlusPlusGan
 from jasna.models.basicvsrpp.mmagic.basicvsr import BasicVSR
@@ -56,7 +57,13 @@ def load_model(config: str | dict | None, checkpoint_path: str, device: torch.de
     _prev_level = _mmengine_logger.level
     _mmengine_logger.setLevel(logging.WARNING)
     try:
-        load_checkpoint(model, checkpoint_path, map_location='cpu', logger=logger)
+        if device is not None and device.type == 'mps':
+            # Stock mmengine defaults changed with Torch 2.6; the portable Lada
+            # checkpoint is a tensor-only state_dict. Load on CPU, strictly,
+            # before moving parameters AND buffers to MPS below.
+            model.load_state_dict(load_restoration_state_dict(checkpoint_path), strict=True)
+        else:
+            load_checkpoint(model, checkpoint_path, map_location='cpu', logger=logger)
     finally:
         _mmengine_logger.setLevel(_prev_level)
     model.cfg = config

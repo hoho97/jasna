@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 from jasna.accelerator import device_name
+from jasna.model_weights import load_rfdetr_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class RfDetrTorchRunner:
         self.device = torch.device(device)
         self.fp16 = bool(fp16)
 
-        checkpoint = torch.load(weights_path, map_location="cpu", weights_only=False)
+        checkpoint = load_rfdetr_checkpoint(weights_path)
         state = checkpoint["model"]
         num_classes = int(state["class_embed.weight"].shape[0]) - 1
 
@@ -79,7 +80,8 @@ class RfDetrTorchRunner:
             num_classes=num_classes,
             resolution=int(resolution),
             pretrain_weights=str(weights_path),
-            device=str(self.device),
+            # Construct/load buffers on CPU; transfer only after loading.
+            device="cpu" if self.device.type == "mps" else str(self.device),
         )
         core = wrapper.model.model
         if core is None:
