@@ -11,10 +11,14 @@ from jasna._frozen import is_frozen
 def model_weights_dir() -> Path:
     """Resolve the ``model_weights`` directory.
 
+    ``JASNA_MODEL_WEIGHTS_DIR`` overrides both source and frozen defaults.
     When running as a frozen executable, models are bundled next to the executable.
     In a dev / source checkout we fall back to a CWD-relative path so existing dev
     workflows keep working.
     """
+    override = os.environ.get("JASNA_MODEL_WEIGHTS_DIR")
+    if override:
+        return Path(override).expanduser()
     if is_frozen():
         return Path(sys.executable).parent / "model_weights"
     return Path("model_weights")

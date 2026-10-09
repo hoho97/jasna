@@ -298,7 +298,7 @@ class TestRfDetrCall:
 
 
 class TestCompileRfdetrEngine:
-    def test_delegates_to_compile_onnx(self):
+    def test_delegates_to_compile_onnx(self, nvidia_trt_compiler):
         with patch("jasna.trt.compile_onnx_to_tensorrt_engine", return_value=Path("out.engine")) as mock_compile:
             result = compile_rfdetr_engine(
                 Path("model.onnx"),

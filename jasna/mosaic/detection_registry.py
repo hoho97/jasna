@@ -6,7 +6,8 @@ from pathlib import Path
 
 import torch
 
-from jasna.accelerator import is_amd_device, is_nvidia_device
+from jasna.accelerator import is_amd_device, is_apple_device, is_nvidia_device
+from jasna.model_weights import validate_weights_path
 from jasna.engine_paths import model_weights_dir
 
 
@@ -89,10 +90,10 @@ _RFDETR_PATTERN = re.compile(r"^rfdetr-.+$")
 
 
 def rfdetr_weights_suffix() -> str:
-    """AMD runs RF-DETR from the trained torch checkpoint (``.pt``); NVIDIA
+    """AMD and Apple run RF-DETR from the trained torch checkpoint (``.pt``); NVIDIA
     compiles the ONNX export to TensorRT (``.onnx``). Resolved from the active
     accelerator vendor — release binaries are vendor-specific."""
-    return ".pt" if is_amd_device() else ".onnx"
+    return ".pt" if is_amd_device() or is_apple_device() else ".onnx"
 
 
 def is_rfdetr_model(name: str) -> bool:
@@ -184,9 +185,11 @@ def resolve_detection_model(
     ``score_threshold`` means the model's recommended one.
     """
     name = coerce_detection_model_name(name)
-    path = Path(explicit_path) if explicit_path.strip() else require_detection_model_weights(name)
-    if not path.exists():
-        raise FileNotFoundError(str(path))
+    path = Path(explicit_path).expanduser() if explicit_path.strip() else require_detection_model_weights(name)
+    if is_apple_device():
+        validate_weights_path(path, suffix=".pt", model=f"{name} on Apple/MPS")
+    elif not path.is_file():
+        raise FileNotFoundError(f"Detection model weights not found: {path}")
     threshold = recommended_score_threshold(name) if score_threshold is None else float(score_threshold)
     return name, path, threshold
 

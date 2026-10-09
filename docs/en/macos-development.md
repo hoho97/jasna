@@ -84,3 +84,62 @@ establishes whether stock `mmengine==0.10.7` imports with the selected macOS
 Torch build. Checkpoint-loading behavior that exercises the patch must be
 verified with the real BasicVSR++ weights on Apple Silicon before this port is
 considered complete.
+
+## Model paths and cache policy (issue #5)
+
+Reuse the free Windows release checkpoints without editing the release folder.
+An explicit `--detection-model-path` / `--restoration-model-path` takes precedence
+for that model. Alternatively set the directory before launching Jasna:
+
+```bash
+export JASNA_MODEL_WEIGHTS_DIR="/Users/kaho/jasna-mac/Windows Release/jasna-windows-0.10.0.7z/model_weights"
+```
+
+Resolution order: explicit per-model path, `JASNA_MODEL_WEIGHTS_DIR`, frozen
+executable's adjacent `model_weights`, source checkout's CWD `model_weights`.
+The override is shared by the lightweight engine-path helpers, including their
+import-time secondary-model constants; set it before importing Jasna.
+
+Apple and AMD select RF-DETR `.pt`; NVIDIA retains `.onnx` → TensorRT. Apple
+explicit detector paths require `.pt`, and BasicVSR++ requires `.pth` with a
+tensor state_dict. Errors identify missing files, encrypted weights, incompatible
+extensions, corrupt payloads, and wrong checkpoint schemas. The seven-file
+inventory, hashes, versions and provenance are in
+[`assets/THIRD_PARTY_MODELS.md`](../../assets/THIRD_PARTY_MODELS.md).
+
+CPU deserialization is a loading stage, not a model-execution fallback.
+RF-DETR constructs on CPU before final `.to(mps)`; BasicVSR++ loads its strict
+state_dict on CPU before transferring parameters and buffers. MPS verification
+uses FP32. Do not assume YOLO's serialized FP16 model is ready for FP32 input;
+convert the loaded model to FP32 before moving it to MPS.
+
+Apple uses eager PyTorch and creates no TensorRT or compiled-model cache.
+Engine preflight never probes existing NVIDIA engine files or launches a
+compiler on Apple. Explicit `.engine` or `.onnx` detector inputs are rejected;
+YOLO's direct loader also rejects these on MPS. Existing NVIDIA engine names
+and Windows/Linux suffixes are unchanged. AMD retains its Torch path. Do not
+share generated engines or compiled artifacts across vendors; raw free
+checkpoints can be shared read-only. Use a separate writable working weights
+copy for NVIDIA compilation, which can write beside its raw models.
+
+This foundation does not enable full RF-DETR MPS inference (#8), BasicVSR++
+temporal inference (#9), YOLO pipeline support (#14), or CLI E2E (#12).
+The real tests below validate loading and checkpoint-backed submodule operations,
+not full detector/restorer output. `unet-4x.onnx.enc` remains unsupported;
+no private protection code or CPU inference fallback is introduced.
+
+### Real checkpoint loading verification
+
+In a native macOS environment with the `macos,dev` dependencies installed:
+
+```bash
+export JASNA_TEST_MODEL_WEIGHTS_DIR="/Users/kaho/jasna-mac/Windows Release/jasna-windows-0.10.0.7z/model_weights"
+python -m pytest -q tests/test_model_weights_dir.py tests/test_detection_registry.py tests/test_ltx_model_files.py tests/test_mps_model_loading.py
+shasum -a 256 "$JASNA_TEST_MODEL_WEIGHTS_DIR/"*
+```
+
+The real tests skip only when the opt-in path is unset. With the path set they
+require available MPS, all four free PyTorch files, correct tensor counts,
+shapes, all parameters/buffers on MPS, FP32 floating values, and finite outputs.
+They run both RF-DETR class heads, the BasicVSR++ feature extractor and the YOLO
+stem using actual checkpoint weights. No checkpoint is saved or modified.

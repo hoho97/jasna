@@ -244,7 +244,7 @@ def test_precompile_noop_on_cpu() -> None:
     precompile_detection_engine("rfdetr-v5", Path("m.onnx"), 1, torch.device("cpu"), True)
 
 
-def test_precompile_rfdetr_on_cuda() -> None:
+def test_precompile_rfdetr_on_cuda(nvidia_trt_compiler) -> None:
     with patch("jasna.trt.compile_onnx_to_tensorrt_engine") as mock_compile:
         precompile_detection_engine("rfdetr-v5", Path("m.onnx"), 2, torch.device("cuda:0"), True)
         mock_compile.assert_called_once_with(
@@ -253,7 +253,7 @@ def test_precompile_rfdetr_on_cuda() -> None:
         )
 
 
-def test_precompile_rfdetr_v6_uses_requested_dynamic_batch() -> None:
+def test_precompile_rfdetr_v6_uses_requested_dynamic_batch(nvidia_trt_compiler) -> None:
     with patch("jasna.trt.compile_onnx_to_tensorrt_engine") as mock_compile:
         precompile_detection_engine(
             "rfdetr-v6",
@@ -405,3 +405,12 @@ def test_resolve_detection_model_rejects_a_missing_explicit_path(tmp_path) -> No
 
     with pytest.raises(FileNotFoundError):
         resolve_detection_model("rfdetr-v6", str(tmp_path / "missing.onnx"), None)
+
+
+@pytest.fixture(autouse=True)
+def _nvidia_registry_default(monkeypatch):
+    monkeypatch.setattr(torch.version, "cuda", "test-nvidia")
+    monkeypatch.setattr(torch.version, "hip", None)
+    # These legacy cases exercise ONNX discovery. Apple cases override this fixture.
+    monkeypatch.delenv("JASNA_MODEL_WEIGHTS_DIR", raising=False)
+    monkeypatch.setattr("jasna.mosaic.detection_registry.is_apple_device", lambda: False)

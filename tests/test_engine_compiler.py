@@ -190,7 +190,7 @@ def test_detection_engine_exists_rfdetr(tmp_path: Path) -> None:
         "rfdetr-v5", str(onnx_path), 4, True, "cuda:0"
     ) is False
 
-    from jasna.trt import get_onnx_tensorrt_engine_path
+    from jasna.engine_paths import get_onnx_tensorrt_engine_path
     engine = get_onnx_tensorrt_engine_path(
         onnx_path,
         batch_size=4,
@@ -210,7 +210,7 @@ def test_detection_engine_exists_rfdetr_v6_uses_dynamic_path(
     onnx_path = tmp_path / "rfdetr-v6.onnx"
     onnx_path.write_text("x")
 
-    from jasna.trt import get_onnx_tensorrt_engine_path
+    from jasna.engine_paths import get_onnx_tensorrt_engine_path
 
     engine = get_onnx_tensorrt_engine_path(
         onnx_path,
@@ -257,11 +257,23 @@ def test_unet4x_engine_exists_encrypted(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("jasna.engine_paths.UNET4X_ONNX_PATH", onnx_path)
     enc_engine = tmp_path / "unet-4x.fp16.linux.engine.enc"
     monkeypatch.setattr("jasna.engine_paths.get_unet4x_encrypted_engine_path", lambda fp16=True: enc_engine)
-    monkeypatch.setattr(
-        "jasna.protection.protected_model.decrypt_engine_bytes",
-        lambda model_id, data: b"decrypted-engine",
+    # This test exercises the compiler boundary, not private decryption code.
+    import sys
+    from types import SimpleNamespace
+
+    protection = SimpleNamespace(
+        ProtectionError=RuntimeError,
+        protected_model=SimpleNamespace(decrypt_engine_bytes=lambda model_id, data: b"decrypted-engine"),
     )
+    monkeypatch.setitem(sys.modules, "jasna.protection", protection)
 
     assert _unet4x_engine_exists(fp16=True) is False
     enc_engine.write_text("x")
     assert _unet4x_engine_exists(fp16=True) is True
+
+
+@pytest.fixture(autouse=True)
+def _nvidia_default(monkeypatch):
+    import torch
+    monkeypatch.setattr(torch.version, "cuda", "test-nvidia")
+    monkeypatch.setattr(torch.version, "hip", None)

@@ -158,6 +158,10 @@ class YoloMosaicDetectionModel:
         self.input_dtype = torch.float16 if self.fp16 else torch.float32
 
         runtime_path = self.model_path
+        if self.device.type == "mps":
+            from jasna.model_weights import validate_weights_path
+
+            validate_weights_path(runtime_path, suffix=".pt", model="YOLO on Apple/MPS")
         if is_nvidia_device(self.device):
             runtime_path = get_yolo_tensorrt_engine_path(self.model_path, fp16=self.fp16)
             if not runtime_path.exists():
