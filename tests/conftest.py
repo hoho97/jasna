@@ -60,3 +60,34 @@ def nvidia_trt_compiler(monkeypatch):
     module = ModuleType("jasna.trt")
     module.compile_onnx_to_tensorrt_engine = MagicMock()
     monkeypatch.setitem(sys.modules, "jasna.trt", module)
+
+
+@pytest.fixture
+def nvidia_build(monkeypatch):
+    """Mock the CUDA build identity, without requiring NVIDIA hardware."""
+    import torch
+    monkeypatch.setattr(torch.version, "cuda", "test-nvidia")
+    monkeypatch.setattr(torch.version, "hip", None)
+
+
+@pytest.fixture
+def nvidia_cli(nvidia_build, nvidia_optional_modules, monkeypatch):
+    from contextlib import nullcontext
+    monkeypatch.setattr("jasna.accelerator.device_context", lambda _: nullcontext())
+
+
+@pytest.fixture
+def nvidia_optional_modules(monkeypatch):
+    """Mock SDK constructors at the boundary used by CLI composition tests."""
+    import sys
+    from types import ModuleType
+    from unittest.mock import MagicMock
+    for name, symbols in {
+        "jasna.restorer.unet4x_secondary_restorer": ["Unet4xSecondaryRestorer"],
+        "jasna.restorer.rtx_superres_secondary_restorer": ["RtxSuperresSecondaryRestorer"],
+        "jasna.restorer.basicvsrpp_sub_engines": ["compile_basicvsrpp_engines", "BasicVSRPlusPlusNetSplit"],
+    }.items():
+        module = ModuleType(name)
+        for symbol in symbols:
+            setattr(module, symbol, MagicMock())
+        monkeypatch.setitem(sys.modules, name, module)

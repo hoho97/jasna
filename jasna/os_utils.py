@@ -15,7 +15,7 @@ MIN_DRIVER_VERSION = 580 if sys.platform == "linux" else 610
 
 def check_supported_gpu(
     device: str = "cuda:0",
-) -> tuple[bool, str] | tuple[bool, tuple[str, int, int]]:
+) -> tuple[bool, str] | tuple[bool, tuple]:
     """Validate the GPU supported by the current vendor-specific build."""
     try:
         from jasna._suppress_noise import install as _install_noise_filters
@@ -23,6 +23,16 @@ def check_supported_gpu(
         import torch
         from jasna.accelerator import AcceleratorVendor, vendor_for_device
     except ImportError:
+        return False, "no_cuda"
+    if str(device).split(":")[0] == "mps":
+        backend = getattr(torch.backends, "mps", None)
+        if backend is None or not backend.is_built():
+            return False, "mps_not_built"
+        if not backend.is_available():
+            return False, "mps_unavailable"
+        from jasna.accelerator import device_name
+        return True, device_name(device)
+    if str(device).split(":")[0] != "cuda":
         return False, "no_cuda"
     if not torch.cuda.is_available():
         return False, "no_cuda"
@@ -42,6 +52,10 @@ def check_supported_gpu(
 
 def gpu_check_error(result: str | tuple) -> str:
     """English CLI message for a failed check_supported_gpu result."""
+    if result == "mps_not_built":
+        return "MPS requested, but this PyTorch build has no MPS support. Install the macOS Torch build."
+    if result == "mps_unavailable":
+        return "MPS requested, but unavailable. Check macOS and Apple Silicon support in this PyTorch build."
     if result == "no_cuda":
         return "No compatible GPU was found for this Jasna build."
     if result[0] == "arch_unsupported":
@@ -312,8 +326,15 @@ def check_windows_nvidia_sysmem_fallback_policy() -> tuple[bool, str]:
     return False, "Driver Default (recommended: Prefer No Sysmem Fallback)"
 
 
-def check_gpu_driver_version() -> tuple[bool, str]:
+def check_gpu_driver_version(device: str | None = None) -> tuple[bool, str]:
     import torch
+
+    if device is not None and str(device).split(":")[0] == "mps":
+        ok, info = check_supported_gpu(device)
+        if not ok:
+            return False, gpu_check_error(info)
+        import platform
+        return True, f"{info}; macOS {platform.mac_ver()[0]}; PyTorch MPS"
 
     hip_version = torch.version.hip
     if hip_version:

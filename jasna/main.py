@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -103,6 +104,8 @@ def _resolve_cli_encoder_settings(
     from jasna.media.encoder_settings import encoder_cq_spec, validate_encoder_cq
 
     resolved_vendor = AcceleratorVendor(str(vendor))
+    if resolved_vendor is AcceleratorVendor.APPLE:
+        raise ValueError("Apple/MPS software video encoding is not implemented yet (#11); NVENC/AMF require NVIDIA/AMD.")
     settings = parse_encoder_settings(raw_settings)
     cq_aliases = {"cq"}
     if resolved_vendor is AcceleratorVendor.AMD:
@@ -597,7 +600,7 @@ def _check_system(args: argparse.Namespace) -> None:
         print(f"Error: {gpu_check_error(gpu_result)}")
         sys.exit(1)
 
-    driver_ok, driver_info = check_gpu_driver_version()
+    driver_ok, driver_info = check_gpu_driver_version(str(args.device))
     if not driver_ok:
         print(f"Error: GPU driver version check failed: {driver_info}")
         if "ROCm" not in driver_info:
@@ -606,7 +609,7 @@ def _check_system(args: argparse.Namespace) -> None:
 
     from jasna.accelerator import is_nvidia_device
 
-    if sys.platform == "win32" and is_nvidia_device():
+    if sys.platform == "win32" and is_nvidia_device(str(args.device)):
         sysmem_ok, sysmem_info = check_windows_nvidia_sysmem_fallback_policy()
         if not sysmem_ok:
             print(f"Warning: CUDA Sysmem Fallback Policy: {sysmem_info}")
@@ -816,6 +819,21 @@ def main() -> None:
         for value in sys.argv[1:]
     )
 
+    # Reject unsupported requests before benchmarks, downloads or optional imports.
+    from jasna.backend_preflight import validate_backend_options
+    try:
+        validate_backend_options(
+            args.device,
+            secondary_restoration=args.secondary_restoration,
+            restoration_model_name=args.restoration_model_name,
+            ltx_fast=args.ltx_fast or args.ltx_trial,
+            decode_backend=os.environ.get("JASNA_DECODE_BACKEND", "auto"),
+            advanced_video=args.benchmark or args.stream or bool(args.segments.strip())
+            or args.vr_mode not in {"auto", "off"},
+        )
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
+
     if args.benchmark:
         from jasna.benchmark import run_benchmark_cli
         run_benchmark_cli(args)
@@ -866,6 +884,12 @@ def main() -> None:
     folder_images: list[Path] = []
     folder_videos: list[Path] = []
     folder_output_dir: Path | None = None
+    from jasna.accelerator import is_apple_device
+    apple = is_apple_device(args.device)
+    if apple and (input_is_image or input_is_dir):
+        parser.error("Image/folder restoration is not supported on Apple/MPS yet; SD1.5 requires the supporter backend.")
+    if apple and (args.license_email or args.license_key):
+        parser.error("Supporter/protected models are not supported on Apple/MPS; use free checkpoints.")
     if input_is_dir:
         if is_streaming:
             parser.error("--stream does not support folder input")

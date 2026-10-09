@@ -31,10 +31,19 @@ def _detection_weights_path(settings: AppSettings) -> Path:
     return detection_model_weights_path(coerce_detection_model_name(str(settings.detection_model)))
 
 
-def run_engine_preflight(settings: AppSettings) -> EnginePreflightResult:
+def run_engine_preflight(settings: AppSettings, *, device: str = "cuda:0") -> EnginePreflightResult:
     import torch
 
-    from jasna.accelerator import is_amd_device
+    from jasna.accelerator import is_amd_device, is_apple_device
+    # The GUI's device selection remains owned by its platform integration.
+    # Explicit MPS callers must never probe NVIDIA caches.
+    if is_apple_device(device):
+        from jasna.backend_preflight import validate_backend_options
+        validate_backend_options(
+            device, secondary_restoration=settings.secondary_restoration,
+            restoration_model_name=settings.restoration_model,
+        )
+        return EnginePreflightResult(requirements=(), should_warn_first_run_slow=False)
     from jasna.engine_paths import (
         default_restoration_model_path,
         expected_unet4x_engine_path,
@@ -50,7 +59,7 @@ def run_engine_preflight(settings: AppSettings) -> EnginePreflightResult:
     )
 
     reqs: list[EngineRequirement] = []
-    device = torch.device("cuda:0")
+    device = torch.device(device)
     amd = is_amd_device(device)
 
     det_name = coerce_detection_model_name(str(settings.detection_model))

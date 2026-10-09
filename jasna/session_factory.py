@@ -113,6 +113,8 @@ def build_compiled_detection_model(
 
 
 def _build_secondary_restorer(config: SessionConfig, device: "torch.device"):
+    from jasna.backend_preflight import validate_backend_options
+    validate_backend_options(device, secondary_restoration=config.secondary_restoration)
     if config.secondary_restoration == "none":
         return None
     if config.secondary_restoration == "tvai":
@@ -163,6 +165,13 @@ def build_restoration_session(
         config.secondary_restoration != "none" or config.denoise_strength != "none"
     ):
         raise ValueError("LTX restoration does not support secondary restoration or denoise")
+    from jasna.backend_preflight import validate_backend_options
+    validate_backend_options(
+        device, secondary_restoration=config.secondary_restoration,
+        restoration_model_name=config.restoration_model_name,
+        ltx_fast=config.ltx_fast or config.ltx_trial,
+        advanced_video=config.vr_mode not in {"auto", "off"},
+    )
     session = RestorationSession(device=device, restoration_pipeline=None)
     provide_restoration_models(
         config, session, frozenset({config.restoration_model_name}), log_callback=log_callback
@@ -179,6 +188,11 @@ def provide_restoration_models(
 ) -> None:
     """Load each of ``models`` the session does not hold yet. ``--restoration-model-path``
     belongs to the job's model; another model loads from its default path."""
+    from jasna.backend_preflight import validate_backend_options
+    validate_backend_options(
+        session.device, secondary_restoration=config.secondary_restoration,
+        restoration_model_name="ltx" if "ltx" in models else config.restoration_model_name,
+    )
     if "basicvsrpp" in models and session.restoration_pipeline is None:
         session.restoration_pipeline = _build_basicvsrpp_pipeline(config, session.device, log_callback=log_callback)
     if "ltx" in models and session.ltx_files is None:
@@ -236,11 +250,13 @@ def _ltx_model_files(
 ) -> "LtxModelFiles":
     import torch
 
+    from jasna.backend_preflight import validate_backend_options
+    validate_backend_options(device, restoration_model_name="ltx")
     from jasna.accelerator import is_nvidia_device
     from jasna.engine_compiler import EngineCompilationRequest, ensure_engines_compiled
     from jasna.ltx.model_files import LtxModelFiles
 
-    if config.ltx_fast and torch.cuda.get_device_capability(device)[0] < 10:
+    if config.ltx_fast and (not is_nvidia_device(device) or torch.cuda.get_device_capability(device)[0] < 10):
         raise ValueError("The fast LTX model needs an RTX 50-series (Blackwell) GPU")
     if config.ltx_trial:
         from jasna.ltx.model_files import LTX_TRIAL_NOTICE
@@ -274,6 +290,8 @@ def build_pipeline(
     splice_plan: "SplicePlan | None" = None,
 ) -> "Pipeline":
     """A per-video ``Pipeline``; the session first loads any model the segments ask for."""
+    from jasna.backend_preflight import validate_backend_options
+    validate_backend_options(session.device, advanced_video=bool(segments or splice_plan))
     from jasna.pipeline import Pipeline
     from jasna.segments import job_restoration, resolve_restorations
 

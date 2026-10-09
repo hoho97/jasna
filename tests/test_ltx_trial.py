@@ -66,16 +66,18 @@ def test_placeholder_vae_loads_into_the_encoder_and_decoder():
     load_video_decoder(files.vae, files.tuned_decoder, torch.device("cpu"))
 
 
-def test_trial_session_uses_placeholders_without_files_or_license():
+def test_trial_session_uses_placeholders_without_files_or_license(monkeypatch):
     from jasna.session_factory import _ltx_model_files
 
+    monkeypatch.setattr(torch.version, "cuda", "test-nvidia")
+    monkeypatch.setattr(torch.version, "hip", None)
     config = session_config(restoration_model_name="ltx", ltx_trial=True, ltx_model="undistilled")
     with (
         patch("jasna.accelerator.is_nvidia_device", return_value=True),
         patch("jasna.engine_compiler.ensure_engines_compiled"),
         patch("jasna.ltx.model_files.LtxModelFiles.from_dir", side_effect=AssertionError("reads model files")),
     ):
-        files = _ltx_model_files(config, MagicMock(), log_callback=None)
+        files = _ltx_model_files(config, torch.device("cuda:0"), log_callback=None)
     assert files == LtxModelFiles.placeholder("undistilled", fast=False)
 
 

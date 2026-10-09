@@ -7,6 +7,8 @@ import pytest
 
 from jasna.main import build_parser
 
+pytestmark = pytest.mark.usefixtures("nvidia_cli")
+
 
 # ---------------------------------------------------------------------------
 # Helpers

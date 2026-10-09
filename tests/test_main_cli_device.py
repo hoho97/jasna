@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-def test_cli_creates_stream_on_chosen_device(tmp_path: Path) -> None:
+def test_cli_creates_stream_on_chosen_device(tmp_path: Path, nvidia_build) -> None:
     input_path = tmp_path / "in.mp4"
     input_path.touch()
     output_path = tmp_path / "out.mkv"
