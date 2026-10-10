@@ -15,6 +15,18 @@ from jasna.pipeline_items import ClipRestoreItem, FrameMeta, PrimaryRestoreResul
 from jasna.tracking.clip_tracker import TrackedClip
 
 
+@pytest.fixture(autouse=True)
+def cuda_memory_boundary(monkeypatch):
+    """The pipeline is mocked; supply the remaining external CUDA memory API."""
+    from types import SimpleNamespace
+    monkeypatch.setattr("jasna.pipeline_threads.empty_cache", lambda device: None)
+    monkeypatch.setattr(torch.cuda, "ipc_collect", lambda: None)
+    monkeypatch.setattr(torch.cuda, "get_device_properties",
+                        lambda device: SimpleNamespace(total_memory=8 * 1024 ** 3))
+    monkeypatch.setattr(torch.cuda, "mem_get_info",
+                        lambda device: (7 * 1024 ** 3, 8 * 1024 ** 3))
+
+
 def _fake_metadata() -> VideoMetadata:
     return VideoMetadata(
         video_file="fake_input.mkv",

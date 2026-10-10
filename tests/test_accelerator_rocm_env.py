@@ -2,6 +2,7 @@
 import os
 
 import torch
+import pytest
 
 from jasna.accelerator import apply_rocm_env_defaults, configure_rocm_process_env
 
@@ -40,3 +41,11 @@ def test_process_env_gets_rocm_defaults_on_rocm(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     configure_rocm_process_env()
     assert {name: os.environ[name] for name in ROCM_DEFAULTS} == ROCM_DEFAULTS
+
+
+@pytest.mark.parametrize("name", ROCM_DEFAULTS)
+def test_each_user_setting_wins(name):
+    environ = {name: "0" if name == "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL" else "user-value"}
+    expected = environ[name]
+    apply_rocm_env_defaults(environ)
+    assert environ == {**ROCM_DEFAULTS, name: expected}

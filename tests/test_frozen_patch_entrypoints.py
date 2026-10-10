@@ -57,7 +57,7 @@ def test_importing_pipeline_does_not_patch_frozen_torch():
             sys.modules.pop("jasna.pipeline", None)
 
 
-def test_cli_main_patches_frozen_torch(tmp_path):
+def test_cli_main_patches_frozen_torch(tmp_path, nvidia_cli):
     inp, out, rest, det = _make_model_files(tmp_path)
     with patch("jasna._frozen.patch_frozen_torch") as spy:
         with _main_patches():

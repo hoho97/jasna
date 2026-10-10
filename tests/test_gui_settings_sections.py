@@ -21,6 +21,8 @@ from jasna.gui.settings_sections.secondary import SecondarySection
 from jasna.gui.settings_sections.widgets import ValueOptionMenu
 from factories import ltx_models
 
+pytestmark = pytest.mark.usefixtures("nvidia_encoding_gui")
+
 
 class _FakeValueMenu:
     def __init__(self, options: dict[str, str], value: str):
@@ -197,8 +199,8 @@ def _basic_section_panel(monkeypatch, tmp_path):
 
     from jasna.gui.settings_panel import SettingsPanel
 
-    panel = SettingsPanel(root, PresetManager(), ltx_models=ltx_models(root, tmp_path / "ltx", installed=True))
     try:
+        panel = SettingsPanel(root, PresetManager(), ltx_models=ltx_models(root, tmp_path / "ltx", installed=True))
         yield panel, next(section for section in panel._sections if isinstance(section, BasicSection))
     finally:
         root.destroy()
