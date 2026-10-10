@@ -21,6 +21,9 @@ from jasna.mosaic.detection_registry import build_detection_model
 from jasna.tracking.clip_tracker import ClipTracker
 
 
+pytestmark = [pytest.mark.mps_real, pytest.mark.model_required]
+
+
 @pytest.fixture(scope="module")
 def frames() -> torch.Tensor:
     value = os.environ.get("JASNA_TEST_MODEL_WEIGHTS_DIR")
