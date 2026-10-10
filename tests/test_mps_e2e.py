@@ -15,6 +15,7 @@ import threading
 import time
 
 import av
+import numpy as np
 import pytest
 import torch
 
@@ -36,7 +37,7 @@ def test_real_cli_detection_restoration_encode(real_mps_weights, tmp_path, monke
     verify_cli_detection_restoration_encode(real_mps_weights, tmp_path, monkeypatch, "software", "h264")
 
 
-def verify_cli_detection_restoration_encode(real_mps_weights, tmp_path, monkeypatch, encode_backend, codec):
+def verify_cli_detection_restoration_encode(real_mps_weights, tmp_path, monkeypatch, encode_backend, codec, native_runner=None):
     from jasna.main import main
     from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner
     from jasna.mosaic.rfdetr import RfDetrMosaicDetectionModel
@@ -102,7 +103,21 @@ def verify_cli_detection_restoration_encode(real_mps_weights, tmp_path, monkeypa
         assert self.restoration_pipeline.restorer.model is None
         closed.append(True)
 
-    monkeypatch.setattr(RfDetrTorchRunner, "infer", observed_infer)
+    if native_runner is None:
+        monkeypatch.setattr(RfDetrTorchRunner, "infer", observed_infer)
+    else:
+        native_detect = native_runner.detect
+        def observed_native(self, inputs, **kwargs):
+            result = native_detect(self, inputs, **kwargs)
+            assert inputs.device.type == "mps" and inputs.dtype == torch.float32
+            assert inputs.shape == (1, 3, 576, 576)
+            for boxes, masks in zip(result.boxes_xyxy, result.masks):
+                assert boxes.shape == (len(masks), 4) and np.isfinite(boxes).all()
+                assert masks.device.type == "mps" and masks.dtype == torch.bool
+                assert masks.shape[1:] == (144, 144)
+            detector_contracts.append({"native_selected": [tuple(m.shape) for m in result.masks]})
+            return result
+        monkeypatch.setattr(native_runner, "detect", observed_native)
     monkeypatch.setattr(RfDetrMosaicDetectionModel, "__call__", observed_detect)
     monkeypatch.setattr(BasicvsrppMosaicRestorer, "raw_process", observed_restore)
     monkeypatch.setattr(RestorationSession, "close", observed_close)

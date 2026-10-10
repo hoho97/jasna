@@ -66,6 +66,12 @@ macos = [
   "rfdetr==1.8.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "transformers==5.1.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
+macos-mlx = [
+  "mlx==0.31.2; platform_system == 'Darwin' and platform_machine == 'arm64'",
+]
+macos-coreml = [
+  "coremltools==9.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+]
 dev = [
   "nuitka>=2.4",
   "pytest",
@@ -77,6 +83,9 @@ dev = [
 
 [tool.setuptools]
 include-package-data = false
+
+[tool.setuptools.package-data]
+"jasna.mosaic.mlx_rfdetr" = ["NOTICE.md"]
 
 [tool.setuptools.packages.find]
 include = ["jasna*"]

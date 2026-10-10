@@ -75,6 +75,7 @@ class RfDetrMosaicDetectionModel:
         max_select: int = DEFAULT_MAX_SELECT,
         fp16: bool = True,
     ) -> None:
+        self._native_postprocess = False
         self.weights_path = weights_path
         self.batch_size = int(batch_size)
         self.device = device
@@ -95,9 +96,18 @@ class RfDetrMosaicDetectionModel:
                     "use rfdetr-v6, rfdetr-v6-large or rfdetr-vr-v1. "
                     "Legacy checkpoint variants cannot be inferred."
                 )
-            from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner
+            from jasna.mosaic.rfdetr_apple import apple_rfdetr_backend
+            backend = apple_rfdetr_backend(self.device)
+            if backend == "mlx":
+                from jasna.mosaic.rfdetr_mlx_runner import RfDetrMlxRunner as Runner
+                self._native_postprocess = True
+            elif backend == "coreml":
+                from jasna.mosaic.rfdetr_coreml_runner import RfDetrCoreMLRunner as Runner
+                self._native_postprocess = True
+            else:
+                from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner as Runner
 
-            self.runner = RfDetrTorchRunner(
+            self.runner = Runner(
                 self.weights_path,
                 input_shapes=[
                     (self.batch_size, 3, self.resolution, self.resolution)
@@ -269,6 +279,8 @@ class RfDetrMosaicDetectionModel:
 
     def __call__(self, frames_uint8_bchw: torch.Tensor, *, target_hw: tuple[int, int]) -> Detections:
         x = self._preprocess(frames_uint8_bchw)
+        if self._native_postprocess:
+            return self.runner.detect(x, target_hw=target_hw, score_threshold=self.score_threshold, max_select=self.max_select)
         outs = self._infer(x)
         boxes_list, masks_list = self._postprocess(
             pred_boxes=outs[self.boxes_out],
