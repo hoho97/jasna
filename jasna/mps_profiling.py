@@ -7,7 +7,7 @@ used: no new synchronization or scheduling policy is introduced.
 from __future__ import annotations
 
 from collections import defaultdict
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager, ExitStack, nullcontext
 from functools import wraps
 import threading
 import time
@@ -88,7 +88,7 @@ class ObservedRLock:
 
 
 @contextmanager
-def observe_pipeline(profile):
+def observe_pipeline(profile, *, detail_transfers=False):
     """Process-local patches restored even on error; profiling CLI only."""
     import torch
     from jasna import accelerator
@@ -145,7 +145,11 @@ def observe_pipeline(profile):
                 source = tensor.device.type
                 if target != source:
                     with profile.measure(f'transfer/{source}->{target}', tensor.numel() * tensor.element_size()):
-                        return original_to(tensor, *args, **kwargs)
+                        detail = (profile.measure(
+                            f'transfer_detail/{threading.current_thread().name}/{source}->{target}/{tensor.dtype}/{tuple(tensor.shape)}',
+                            tensor.numel() * tensor.element_size()) if detail_transfers else nullcontext())
+                        with detail:
+                            return original_to(tensor, *args, **kwargs)
             return original_to(tensor, *args, **kwargs)
         patches.enter_context(patch.object(torch.Tensor, 'to', transfer))
         original_cpu = torch.Tensor.cpu

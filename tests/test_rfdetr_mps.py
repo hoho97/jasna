@@ -75,9 +75,9 @@ def test_mps_compile_validates_checkpoint_without_compiling(monkeypatch, tmp_pat
     ("mps", True, False), ("mps", False, False),
     ("cuda:0", True, True), ("cuda:0", False, False),
 ])
-@pytest.mark.parametrize("eager", [False, True])
-def test_runner_precision_policy(monkeypatch, tmp_path, device, requested, expected, eager):
-    monkeypatch.setenv("JASNA_MPS_RFDETR_EAGER", "1" if eager else "0")
+@pytest.mark.parametrize("exported", [False, True])
+def test_runner_precision_policy(monkeypatch, tmp_path, device, requested, expected, exported):
+    monkeypatch.setenv("JASNA_MPS_RFDETR_EXPORT", "1" if exported else "0")
     import jasna.mosaic.rfdetr_torch_runner as module
     path = tmp_path / "model.pt"
     torch.save({"model": {"class_embed.weight": torch.ones(3, 256)}}, path)
@@ -94,8 +94,8 @@ def test_runner_precision_policy(monkeypatch, tmp_path, device, requested, expec
     assert runner.fp16 is expected
     assert wrapper.call_args.kwargs["device"] == ("cpu" if device == "mps" else device)
     core.to.assert_called_once_with(torch.device(device))
-    assert runner._exported is (device == 'mps' and not eager)
-    if device == 'mps' and not eager:
+    assert runner._exported is (device == 'mps' and exported)
+    if device == 'mps' and exported:
         optimize.assert_called_once_with(compile=False, dtype=torch.float32, inplace=True)
     else:
         optimize.assert_not_called()

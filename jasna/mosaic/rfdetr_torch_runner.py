@@ -88,7 +88,9 @@ class RfDetrTorchRunner:
             # Construct/load buffers on CPU; transfer only after loading.
             device="cpu" if self.device.type == "mps" else str(self.device),
         )
-        self._exported = self.device.type == "mps" and os.environ.get("JASNA_MPS_RFDETR_EAGER") != "1"
+        # Experimental opt-in: isolated gains did not generalize to the full
+        # video benchmark. Preserve the existing default until E2E evidence wins.
+        self._exported = self.device.type == "mps" and os.environ.get("JASNA_MPS_RFDETR_EXPORT") == "1"
         if self._exported:
             # rfdetr's supported inference API omits training auxiliary/encoder
             # masks. No tracing/torch.compile, precision change or global patch.
@@ -97,7 +99,7 @@ class RfDetrTorchRunner:
         if self.device.type == "mps":
             logger.info(
                 "RF-DETR MPS path: %s (FP32)",
-                "inference export, no compilation" if self._exported else "eager diagnostic control",
+                "inference export, no compilation" if self._exported else "eager",
             )
         core = wrapper.model.inference_model if self._exported else wrapper.model.model
         if core is None:

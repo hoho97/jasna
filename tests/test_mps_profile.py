@@ -66,3 +66,19 @@ def test_observer_restores_methods_and_lock_on_failure():
         raise ValueError('test')
     assert RfDetrMosaicDetectionModel._postprocess is original
     assert accelerator._MPS_EXECUTION_LOCK is lock
+
+
+def test_transfer_detail_attributes_bytes_without_double_counting():
+    import torch
+    from jasna.mps_profiling import observe_pipeline
+    tensor = torch.ones(2, 3)
+    profile = WallProfile()
+    with observe_pipeline(profile, detail_transfers=True):
+        assert tensor.to('meta').shape == (2, 3)
+    rows = profile.snapshot()
+    aggregate = rows['transfer/cpu->meta']
+    detail = rows['transfer_detail/MainThread/cpu->meta/torch.float32/(2, 3)']
+    assert aggregate['calls'] == detail['calls'] == 1
+    assert aggregate['units'] == detail['units'] == 24
+    assert aggregate['inclusive_seconds'] >= detail['inclusive_seconds']
+    assert aggregate['exclusive_seconds'] < aggregate['inclusive_seconds']

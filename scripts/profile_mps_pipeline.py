@@ -40,15 +40,15 @@ def main():
     parser.add_argument('--weights', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--observe', action='store_true')
+    parser.add_argument('--detail-transfers', action='store_true', help='Attribute Tensor.to transfers by thread, dtype and shape')
     parser.add_argument('--eager-detector', action='store_true', help='Use original MPS forward as before/control')
     parser.add_argument('--batch', type=int, default=4)
     parser.add_argument('--clip', type=int, default=90)
     parser.add_argument('--overlap', type=int, default=8)
     args = parser.parse_args()
-    if args.eager_detector:
-        os.environ['JASNA_MPS_RFDETR_EAGER'] = '1'
-    else:
-        os.environ.pop('JASNA_MPS_RFDETR_EAGER', None)
+    if args.detail_transfers and not args.observe:
+        parser.error('--detail-transfers requires --observe')
+    os.environ['JASNA_MPS_RFDETR_EXPORT'] = '0' if args.eager_detector else '1'
     assert torch.backends.mps.is_built() and torch.backends.mps.is_available()
     assert os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK') != '1'
     from jasna.main import main as cli
@@ -73,9 +73,9 @@ def main():
     env = dict(python=sys.version, torch=torch.__version__, mps_built=torch.backends.mps.is_built(),
                mps_available=torch.backends.mps.is_available(), platform=platform.platform(),
                machine=platform.machine(), command=command, input_sha256=sha256(args.input),
-               weights=hashes, observed=args.observe,
+               weights=hashes, observed=args.observe, detail_transfers=args.detail_transfers,
                versions={p: importlib.metadata.version(p) for p in ('torchvision', 'av', 'rfdetr', 'numpy', 'mmengine')},
-               media={k: os.environ.get(k) for k in ('JASNA_ENCODE_BACKEND', 'JASNA_DECODE_BACKEND', 'JASNA_MPS_RFDETR_EAGER')},
+               media={k: os.environ.get(k) for k in ('JASNA_ENCODE_BACKEND', 'JASNA_DECODE_BACKEND', 'JASNA_MPS_RFDETR_EXPORT')},
                git=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
     save('environment.json', env)
     counts = dict(detection_calls=0, frames=0, positive_frames=0, detections=0,
@@ -120,7 +120,7 @@ def main():
         with patch.object(RfDetrMosaicDetectionModel, '__call__', detect), \
              patch.object(BasicvsrppMosaicRestorer, 'raw_process', restore), \
              patch.object(RestorationPipeline, 'prepare_and_run_primary', primary), \
-             (observe_pipeline(profile) if args.observe else nullcontext()), patch.object(sys, 'argv', command):
+             (observe_pipeline(profile, detail_transfers=args.detail_transfers) if args.observe else nullcontext()), patch.object(sys, 'argv', command):
             cli()
     finally:
         elapsed = time.perf_counter() - start

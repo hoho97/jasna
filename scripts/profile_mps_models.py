@@ -5,6 +5,7 @@ import argparse
 import copy
 from contextlib import ExitStack
 import json
+import hashlib
 import os
 from pathlib import Path
 import statistics
@@ -51,7 +52,10 @@ def main():
     parser.add_argument('--runs', type=int, default=3)
     parser.add_argument('--clips', type=int, nargs='+', default=[2, 16, 45, 90])
     args = parser.parse_args()
-    assert torch.backends.mps.is_available()
+    if args.runs < 1 or any(length < 1 for length in args.clips):
+        parser.error('runs and clip lengths must be positive')
+    assert torch.backends.mps.is_built() and torch.backends.mps.is_available()
+    assert os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK') != '1'
     fixture = Path('assets/test_clip1_1080p.mp4')
     images = []
     with av.open(str(fixture)) as container:
@@ -62,10 +66,15 @@ def main():
                 break
     frames = torch.stack(images).to('mps')
     report = dict(torch=torch.__version__, mps_available=True, fixture=str(fixture), frames=[0,120,121,122], detector=[], restorer=[])
+    def checksum(path):
+        with path.open('rb') as handle:
+            return hashlib.file_digest(handle, 'sha256').hexdigest()
+    checkpoints = [args.weights / name for name in ['rfdetr-v6.pt', 'lada_mosaic_restoration_model_generic_v1.2.pth', 'lada_mosaic_detection_model_v4_fast.pt'] if (args.weights / name).is_file()]
+    report['weights'] = {path.name: checksum(path) for path in checkpoints}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     def save():
         args.output.write_text(json.dumps(report, indent=2, allow_nan=False))
-    os.environ['JASNA_MPS_RFDETR_EAGER'] = '1'
+    os.environ['JASNA_MPS_RFDETR_EXPORT'] = '0'
     config = rfdetr_model_config('rfdetr-v6')
     model = build_detection_model('rfdetr-v6', args.weights / 'rfdetr-v6.pt', batch_size=4,
                                   device=torch.device('mps'), score_threshold=config.score_threshold, fp16=False)
@@ -92,6 +101,17 @@ def main():
                 gather_result, gather_time = timed(lambda: original_sample(sx,sg,**skw), args.runs)
                 native_result, native_time = timed(lambda: native(sx,sg,**skw), args.runs)
                 report.setdefault('sampling',[]).append(dict(batch=batch, input_shape=list(sx.shape), grid_shape=list(sg.shape), gather=gather_time, native=native_time, numerical=error(native_result,gather_result)))
+                save()
+                # Quantify the existing scan-only CPU area fallback separately
+                # from detector forward and its outstanding GPU completion.
+                per_query = reference['labels'].sigmoid().amax(-1)
+                merged = ((reference['masks'] > 0) & (per_query > config.score_threshold)[:, :, None, None]).any(1, keepdim=True).float()
+                host_mask, download = timed(lambda: merged.cpu(), args.runs)
+                resized, resize = timed(lambda: F.interpolate(host_mask, size=(37,65), mode='area'), args.runs)
+                returned, upload = timed(lambda: resized.to('mps'), args.runs)
+                assert returned.device.type == 'mps' and torch.isfinite(returned).all().item()
+                torch.testing.assert_close(returned.cpu(), resized, rtol=0, atol=0)
+                report.setdefault('scan_cpu_mask_resize', []).append(dict(batch=batch, shape=list(merged.shape), target=[37,65], download=download, cpu_area_resize=resize, upload=upload, bytes=merged.numel()*merged.element_size()))
                 save()
                 ref_boxes, ref_masks = model._postprocess(pred_boxes=reference['dets'], pred_logits=reference['labels'],
                                                           pred_masks=reference['masks'], target_hw=(1080,1920),
@@ -122,7 +142,8 @@ def main():
                                                               score_threshold=config.score_threshold, max_select=16)
                             row['detections'] = [len(b) for b in boxes]
                             row['reference_detections'] = [len(b) for b in ref_boxes]
-                            row['selected_box_max_pixels'] = max((float(abs(b-r).max()) for b,r in zip(boxes,ref_boxes) if b.shape==r.shape and len(b)),default=0.)
+                            row['selected_box_shapes_match'] = all(b.shape == r.shape for b,r in zip(boxes,ref_boxes))
+                            row['selected_box_max_pixels'] = max((float(abs(b-r).max()) for b,r in zip(boxes,ref_boxes) if len(b)),default=0.) if row['selected_box_shapes_match'] else None
                             row['masks_exact'] = all(m.shape==r.shape and torch.equal(m,r) for m,r in zip(masks,ref_masks))
                         except Exception as exc:
                             row['error'] = repr(exc)
@@ -189,8 +210,57 @@ def main():
                     print(json.dumps(row), flush=True)
                 del actual, reference
                 torch.mps.empty_cache()
+            # ladamac describes batching equal-length clips. Probe N independently
+            # at the existing clip limit; do not alter production scheduling/caps.
+            restorer.model.float()
+            restorer.model.load_state_dict(restoration_state)
+            restorer.input_dtype = torch.float32
+            length = min(90, max(args.clips))
+            inputs = torch.stack([crops[i % len(crops)] for i in range(length)]).div(255)
+            clips = torch.stack([inputs.roll(shifts=i * 8, dims=-1) for i in range(3)])
+            references = torch.cat([restorer.model(inputs=clip[None]).cpu() for clip in clips])
+            for batch in (1, 2, 3):
+                torch.mps.empty_cache()
+                memory_before = dict(current=torch.mps.current_allocated_memory(), driver=torch.mps.driver_allocated_memory())
+                actual, timing = timed(lambda: restorer.model(inputs=clips[:batch]), args.runs)
+                numerical = error(actual, references[:batch])
+                assert numerical['finite'] and actual.device.type == 'mps'
+                assert actual.dtype == torch.float32 and actual.shape == (batch, length, 3, 256, 256)
+                report.setdefault('restorer_batching', []).append(dict(
+                    batch=batch, length=length, timing=timing, numerical=numerical,
+                    memory_before=memory_before, memory_after=dict(current=torch.mps.current_allocated_memory(), driver=torch.mps.driver_allocated_memory()),
+                    frames_per_second=batch * length / timing['median_seconds'],
+                    shape=list(actual.shape), dtype=str(actual.dtype), device=str(actual.device)))
+                save()
+                del actual
+            del references, clips, inputs
     finally:
         restorer.close()
+        torch.mps.empty_cache()
+    # Detector-only decomposition, never a replacement for the RF-DETR MVP.
+    yolo_weights = args.weights / 'lada_mosaic_detection_model_v4_fast.pt'
+    if yolo_weights.is_file():
+        yolo = build_detection_model('lada-yolo-v4', yolo_weights, batch_size=4, device=torch.device('mps'), score_threshold=.25, fp16=False)
+        uploaded = torch.stack(images).to('mps')
+        try:
+            with torch.inference_mode():
+                for batch in (1,2,4):
+                    preprocessed, _ = yolo._preprocess(uploaded[:batch])
+                    raw, forward = timed(lambda: yolo._forward_raw(preprocessed), args.runs)
+                    assert raw[0].device.type == raw[1].device.type == 'mps'
+                    assert raw[0].dtype == raw[1].dtype == torch.float32
+                    assert torch.isfinite(raw[0]).all().item() and torch.isfinite(raw[1]).all().item()
+                    detections, public = timed(lambda: yolo(uploaded[:batch], target_hw=(1080,1920)), args.runs)
+                    assert len(detections.boxes_xyxy) == len(detections.masks) == batch
+                    for boxes, masks in zip(detections.boxes_xyxy, detections.masks):
+                        assert boxes.shape == (len(masks), 4) and torch.isfinite(torch.as_tensor(boxes)).all().item()
+                        assert masks.device.type == 'mps' and masks.dtype == torch.bool
+                    report.setdefault('yolo_decomposition',[]).append(dict(batch=batch, forward=forward, public=public, detections=[len(b) for b in detections.boxes_xyxy], pred_shape=list(raw[0].shape), proto_shape=list(raw[1].shape), precision='fp32', input_resolution=640, quality_equivalent_to_rfdetr=False))
+                    save()
+        finally:
+            yolo.close()
+            torch.mps.empty_cache()
+    assert report['weights'] == {path.name: checksum(path) for path in checkpoints}
     save()
 
 
