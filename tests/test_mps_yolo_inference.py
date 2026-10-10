@@ -47,9 +47,20 @@ def frames() -> torch.Tensor:
     return torch.stack(images)
 
 
+def _detector_tensors(model) -> list[torch.Tensor]:
+    """Return tensors from the real Ultralytics model behind AutoBackend wrappers."""
+    backend = getattr(model.model, "backend", None)
+    candidates = (getattr(backend, "model", None), backend, model.model)
+    for candidate in candidates:
+        if isinstance(candidate, torch.nn.Module):
+            tensors = list(candidate.parameters()) + list(candidate.buffers())
+            if tensors:
+                return tensors
+    raise AssertionError("Ultralytics AutoBackend does not expose detector parameters or buffers")
+
+
 def _assert_detector_tensors_on(model, device_type: str) -> None:
-    tensors = list(model.model.parameters()) + list(model.model.buffers())
-    assert tensors
+    tensors = _detector_tensors(model)
     for value in tensors:
         assert value.device.type == device_type
         if value.is_floating_point():
