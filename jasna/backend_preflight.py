@@ -1,6 +1,8 @@
 """Shared feature gates, evaluated before loading optional backend modules."""
 from __future__ import annotations
 
+import torch
+
 from jasna.accelerator import capabilities_for_device
 
 
@@ -24,7 +26,8 @@ def validate_backend_options(
         raise ValueError(f"LTX restoration (including fast/trial) is not supported on {device} yet.")
     if advanced_video and not caps.advanced_video:
         raise ValueError(f"VR, streaming, smart rendering and benchmarks are not supported on {device} yet.")
-    if decode_backend in {"vali", "pyav-hw"} and not caps.advanced_video:
+    apple_hardware_decode = decode_backend == "pyav-hw" and torch.device(device).type == "mps"
+    if decode_backend in {"vali", "pyav-hw"} and not apple_hardware_decode and not caps.advanced_video:
         raise ValueError(
             f"Hardware decode '{decode_backend}' is not supported on {device}. "
             "Use JASNA_DECODE_BACKEND=auto or pyav-sw; VALI/NVDEC/AMF require NVIDIA/AMD."

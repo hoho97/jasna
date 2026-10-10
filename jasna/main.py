@@ -188,13 +188,16 @@ def _validate_mps_cli_options(args: argparse.Namespace) -> None:
         raise ValueError("Apple/MPS requires --no-fp16 and --no-compile-basicvsrpp (the MPS defaults).")
     if not 1 <= args.batch_size <= 4 or not 1 <= args.max_clip_size <= 90:
         raise ValueError("Apple/MPS requires --batch-size 1..4 and --max-clip-size 1..90.")
-    if args.codec != "h264":
-        raise ValueError("Apple/MPS currently supports --codec h264 software encoding only.")
+    from jasna.media.videotoolbox import apple_encode_backend
+    if args.codec != "h264" and not (args.codec == "hevc" and apple_encode_backend() != "software"):
+        raise ValueError("Apple/MPS supports H.264 software encoding; HEVC requires JASNA_ENCODE_BACKEND=videotoolbox or auto.")
     if args.vr_mode != "off":
         raise ValueError("VR (including auto-detection) is not supported on mps; use --vr-mode off.")
     if args.detection_model.strip().lower() != "rfdetr-v6":
         raise ValueError("Apple/MPS CLI currently supports --detection-model rfdetr-v6 only.")
     if args.cq is not None:
+        if apple_encode_backend() != "software":
+            raise ValueError("Apple/MPS VideoToolbox uses --encoder-settings b=<bits/second>; --cq is unsupported.")
         raise ValueError("Apple/MPS software encoding uses --encoder-settings crf=23,preset=medium; --cq is unsupported.")
     if args.license_email or args.license_key:
         raise ValueError("Supporter/protected models are not supported on Apple/MPS; use free checkpoints.")

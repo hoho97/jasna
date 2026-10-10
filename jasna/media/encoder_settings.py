@@ -189,6 +189,11 @@ def validate_encoder_settings(
     codec: str,
     vendor: AcceleratorVendor | str,
 ) -> dict[str, object]:
+    if AcceleratorVendor(str(vendor)) is AcceleratorVendor.APPLE:
+        from jasna.media.videotoolbox import apple_encode_backend, validate_videotoolbox_settings
+        if apple_encode_backend() != "software":
+            validate_videotoolbox_settings(settings, codec)
+            return settings
     if AcceleratorVendor(str(vendor)) in {AcceleratorVendor.APPLE, AcceleratorVendor.CPU}:
         if codec != "h264":
             raise ValueError("Software encoding currently supports only 8-bit H.264")

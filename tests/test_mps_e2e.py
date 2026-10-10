@@ -33,13 +33,29 @@ def real_mps_weights():
 
 
 def test_real_cli_detection_restoration_encode(real_mps_weights, tmp_path, monkeypatch):
+    verify_cli_detection_restoration_encode(real_mps_weights, tmp_path, monkeypatch, "software", "h264")
+
+
+def verify_cli_detection_restoration_encode(real_mps_weights, tmp_path, monkeypatch, encode_backend, codec):
     from jasna.main import main
     from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner
     from jasna.mosaic.rfdetr import RfDetrMosaicDetectionModel
     from jasna.restorer.basicvsrpp_mosaic_restorer import BasicvsrppMosaicRestorer
     from jasna.session_factory import RestorationSession
+    from jasna.media.video_encoder import VideoEncoder
+
+    monkeypatch.setenv("JASNA_ENCODE_BACKEND", encode_backend)
+    monkeypatch.setenv("JASNA_DECODE_BACKEND", "pyav-hw" if encode_backend == "videotoolbox" else "pyav-sw")
+    open_encoder = VideoEncoder.__enter__
+    def observed_encoder(self):
+        result = open_encoder(self)
+        assert self.encoder_name == (f"{codec}_videotoolbox" if encode_backend == "videotoolbox" else "libx264")
+        return result
+    monkeypatch.setattr(VideoEncoder, "__enter__", observed_encoder)
 
     root = Path(os.environ.get("JASNA_TEST_VIDEO_OUTPUT_DIR", tmp_path))
+    if encode_backend != "software":
+        root = root / f"{encode_backend}-{codec}"
     root.mkdir(parents=True, exist_ok=True)
     source, output = root / "cli-source.mp4", root / "cli-restored.mp4"
     fixture = Path(__file__).resolve().parents[1] / "assets/test_clip1_1080p.mp4"
@@ -98,7 +114,7 @@ def test_real_cli_detection_restoration_encode(real_mps_weights, tmp_path, monke
     for name in ("set_device", "current_stream", "mem_get_info", "empty_cache", "synchronize", "ipc_collect"):
         monkeypatch.setattr(torch.cuda, name, no_cuda)
     monkeypatch.setattr(sys, "argv", ["jasna", "--device", "mps", "--input", str(source),
-                                     "--output", str(output), "--no-progress", "--log-level", "info"])
+                                     "--output", str(output), "--codec", codec, "--no-progress", "--log-level", "info"])
     started = time.perf_counter()
     main()
     assert len(detector_contracts) == 8
@@ -113,7 +129,7 @@ def test_real_cli_detection_restoration_encode(real_mps_weights, tmp_path, monke
     streams = json.loads(probe.stdout)["streams"]
     video = next(s for s in streams if s["codec_type"] == "video")
     audio = next(s for s in streams if s["codec_type"] == "audio")
-    assert (video["codec_name"], video["width"], video["height"], int(video["nb_read_frames"])) == ("h264", 1920, 1080, 8)
+    assert (video["codec_name"], video["width"], video["height"], int(video["nb_read_frames"])) == (codec, 1920, 1080, 8)
     assert video["avg_frame_rate"] == "30/1"
     assert float(video["duration"]) == pytest.approx(8 / 30, abs=1e-5)
     assert audio["codec_name"] == "aac" and int(audio["nb_read_frames"]) > 0
