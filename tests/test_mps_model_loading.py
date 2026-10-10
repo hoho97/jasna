@@ -169,7 +169,12 @@ def test_direct_yolo_mps_load_rejects_foreign_formats(tmp_path, suffix):
         YoloMosaicDetectionModel(model_path=path, batch_size=1, device=torch.device("mps"))
 
 
-def test_rfdetr_constructs_on_cpu_before_mps_transfer(monkeypatch, tmp_path):
+@pytest.mark.parametrize("exported", [None, False, True])
+def test_rfdetr_constructs_on_cpu_before_mps_transfer(monkeypatch, tmp_path, exported):
+    if exported is None:
+        monkeypatch.delenv("JASNA_MPS_RFDETR_EXPORT", raising=False)
+    else:
+        monkeypatch.setenv("JASNA_MPS_RFDETR_EXPORT", "1" if exported else "0")
     from types import SimpleNamespace
     import sys
     from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner
@@ -187,8 +192,16 @@ def test_rfdetr_constructs_on_cpu_before_mps_transfer(monkeypatch, tmp_path):
         def __init__(self, **kwargs):
             events.append(("construct", kwargs["device"]))
             self.model = SimpleNamespace(model=Core())
+        def optimize_for_inference(self, **kwargs):
+            events.append(("export", kwargs))
+            self.model.inference_model = self.model.model
+            self.model.model = None
     monkeypatch.setitem(sys.modules, "rfdetr", SimpleNamespace(RFDETRSegMedium=Wrapper))
     monkeypatch.setattr(module, "device_name", lambda device: "test MPS")
     runner = RfDetrTorchRunner(weights, [(1, 3, 576, 576)], torch.device("mps"), fp16=False, resolution=576, variant="medium")
-    assert events == [("construct", "cpu"), ("transfer", "mps")]
+    expected = [("construct", "cpu")]
+    if exported:
+        expected.append(("export", dict(compile=False, dtype=torch.float32, inplace=True)))
+    expected.append(("transfer", "mps"))
+    assert events == expected
     runner.close()

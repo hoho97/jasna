@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,7 +88,20 @@ class RfDetrTorchRunner:
             # Construct/load buffers on CPU; transfer only after loading.
             device="cpu" if self.device.type == "mps" else str(self.device),
         )
-        core = wrapper.model.model
+        # Experimental opt-in: isolated gains did not generalize to the full
+        # video benchmark. Preserve the existing default until E2E evidence wins.
+        self._exported = self.device.type == "mps" and os.environ.get("JASNA_MPS_RFDETR_EXPORT") == "1"
+        if self._exported:
+            # rfdetr's supported inference API omits training auxiliary/encoder
+            # masks. No tracing/torch.compile, precision change or global patch.
+            # Export on CPU, in place, to avoid a second copy of the checkpoint.
+            wrapper.optimize_for_inference(compile=False, dtype=torch.float32, inplace=True)
+        if self.device.type == "mps":
+            logger.info(
+                "RF-DETR MPS path: %s (FP32)",
+                "inference export, no compilation" if self._exported else "eager",
+            )
+        core = wrapper.model.inference_model if self._exported else wrapper.model.model
         if core is None:
             raise RuntimeError(
                 "rfdetr model is unavailable after load (inplace-optimized checkpoint)"
@@ -129,6 +143,9 @@ class RfDetrTorchRunner:
             self.device.type, dtype=torch.float16, enabled=self.fp16
         ):
             out = self._core(x)
+        if self._exported:
+            boxes, logits, masks = out
+            return {"dets": boxes.float(), "labels": logits.float(), "masks": masks.float()}
         return {
             "dets": out["pred_boxes"].float(),
             "labels": out["pred_logits"].float(),
