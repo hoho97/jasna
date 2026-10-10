@@ -65,8 +65,8 @@ class RfDetrMlxRunner:
         )
         mx.eval(model.parameters())
         self._model = model
-        # MLX 0.31.2 compiled Module cache destroys Python dicts without the
-        # GIL during worker TLS teardown (native dict_dealloc crash). Keep the
+        # MLX 0.31.2 compiled Module cache crashed in native dict_dealloc
+        # during worker TLS teardown. Keep the
         # fused-SDPA eager graph; do not change Jasna's execution locks (#37).
         self._forward = model
         batch = (

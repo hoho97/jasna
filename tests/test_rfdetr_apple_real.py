@@ -86,6 +86,16 @@ def test_real_native_raw_and_selected_parity(
             assert sum(selected["reference_counts"]) > 0
             assert selected["counts_match"] and selected["positive_decisions_match"]
             assert selected["max_box_pixels"] <= 1 and selected["min_mask_iou"] >= 0.995
+            actual_scores = (
+                a["labels"].sigmoid().flatten(1).topk(16, dim=1).values.cpu()
+            )
+            reference_scores = (
+                r["labels"].sigmoid().flatten(1).topk(16, dim=1).values.cpu()
+            )
+            selected["max_score_error"] = float(
+                (actual_scores - reference_scores).abs().max()
+            )
+            assert selected["max_score_error"] <= 0.001
             print(native_backend, batch, metrics, selected)
     finally:
         native.close()

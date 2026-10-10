@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import statistics
 import time
+from unittest.mock import patch
 import av
 import psutil
 import torch
@@ -141,6 +142,17 @@ def main():
             selected_ref, public_ref = timing(
                 lambda: ref(frames[:batch], target_hw=frames.shape[-2:]), args.runs
             )
+            _, torch_postprocess = timing(
+                lambda: ref._postprocess(
+                    pred_boxes=reference["dets"],
+                    pred_logits=reference["labels"],
+                    pred_masks=reference["masks"],
+                    target_hw=frames.shape[-2:],
+                    score_threshold=0.35,
+                    max_select=16,
+                ),
+                args.runs,
+            )
             ref_cpu = {k: v.cpu() for k, v in reference.items()}
             for backend in args.backends:
                 os.environ["JASNA_APPLE_RFDETR_BACKEND"] = backend
@@ -160,6 +172,7 @@ def main():
                     "torch_preprocess": preprocess,
                     "torch_forward": forward,
                     "torch_public": public_ref,
+                    "torch_postprocess_and_selected_handoff": torch_postprocess,
                 }
                 raw, row["raw_with_handoffs"] = timing(
                     lambda: model._infer(x), args.runs
@@ -181,6 +194,21 @@ def main():
                 _, row["input_download_completed_gpu"] = timing(
                     lambda: x.cpu(), args.runs
                 )
+                # Cache completed native outputs to isolate postprocess/output
+                # handoff from model forward and input download. No production patch.
+                cached = model.runner._raw(x)
+                if backend == "mlx":
+                    model.runner.mx.eval(cached)
+                with patch.object(model.runner, "_raw", return_value=cached):
+                    _, row["postprocess_and_selected_handoff"] = timing(
+                        lambda: model.runner.detect(
+                            x,
+                            target_hw=frames.shape[-2:],
+                            score_threshold=0.35,
+                            max_select=16,
+                        ),
+                        args.runs,
+                    )
                 if backend == "mlx":
                     mx = model.runner.mx
                     host = x.cpu().numpy()
@@ -203,6 +231,14 @@ def main():
                         "peak": mx.get_peak_memory(),
                         "cache": mx.get_cache_memory(),
                     }
+                else:
+                    native_model = model.runner._models[batch]
+                    input_name = model.runner.manifest["models"][str(batch)]["input"]
+                    host = x.cpu().numpy()
+                    _, row["native_forward"] = timing(
+                        lambda: native_model.predict({input_name: host}),
+                        args.runs,
+                    )
                 row["memory"] = {
                     "rss": psutil.Process().memory_info().rss,
                     "mps_allocated": torch.mps.current_allocated_memory(),
@@ -227,7 +263,7 @@ def main():
                 print(json.dumps(row), flush=True)
                 model.close()
                 model = None
-                del raw, repeated, actual
+                del raw, repeated, actual, cached
         ref.close()
     with args.weights.open("rb") as handle:
         assert (
