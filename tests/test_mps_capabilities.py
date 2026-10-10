@@ -132,7 +132,7 @@ def test_nvidia_rocm_capability_contract(monkeypatch, hip, cuda, trt, secondary)
     validate_backend_options("cuda:0", restoration_model_name="ltx", advanced_video=True)
 
 
-@pytest.mark.parametrize("backend", ["vali", "pyav-hw"])
+@pytest.mark.parametrize("backend", ["vali"])
 def test_mps_rejects_hardware_decode_before_open(mps, monkeypatch, backend):
     from jasna.media.video_decoder import VideoReader, VideoDecodeError
     import jasna.media.video_decoder as decoder

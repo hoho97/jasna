@@ -30,6 +30,7 @@ CORRUPT_PACKET_TOLERANCE = 10
 #              keeps its AMF -> software escalation. Apple/CPU use software.
 # - "vali":    VALI only; any failure raises (NVIDIA only).
 # - "pyav-hw": skip VALI, use the PyAV hwaccel path with its software fallback.
+#              Apple tries VideoToolbox; host frames still upload to real MPS.
 # - "pyav-sw": force FFmpeg software decoding with GPU upload on every vendor.
 DECODE_BACKEND_ENV = "JASNA_DECODE_BACKEND"
 _DECODE_BACKENDS = ("auto", "vali", "pyav-hw", "pyav-sw")
@@ -246,11 +247,12 @@ class VideoReader:
         self._decoder_ctx = None
         self._vali_source: _ValiFrameSource | None = None
         self._software_only = False
+        self._videotoolbox = False
 
     def __enter__(self):
         current_stream(self.device)
         backend = _decode_backend()
-        if self.vendor is AcceleratorVendor.APPLE and backend in {"vali", "pyav-hw"}:
+        if self.vendor is AcceleratorVendor.APPLE and backend == "vali":
             raise VideoDecodeError(
                 f"Hardware decode '{backend}' is not supported on Apple/MPS. "
                 "Use JASNA_DECODE_BACKEND=auto or pyav-sw."
@@ -286,7 +288,16 @@ class VideoReader:
         }
         self._software_only = software_only
         try:
-            if not software_only and self.vendor is AcceleratorVendor.NVIDIA:
+            if self.vendor is AcceleratorVendor.APPLE and backend == "pyav-hw":
+                try:
+                    self.container = av.open(self.file, hwaccel=HWAccel(
+                        "videotoolbox", allow_software_fallback=False, is_hw_owned=False,
+                    ))
+                    self._videotoolbox = True
+                except (av.FFmpegError, ValueError, RuntimeError, NotImplementedError) as exc:
+                    log.warning("VideoToolbox decode unavailable for %s: %s; using software decode", self.file, exc)
+                    self.container = av.open(self.file)
+            elif not software_only and self.vendor is AcceleratorVendor.NVIDIA:
                 self.container = av.open(self.file, hwaccel=_cuda_hwaccel(self.device))
             else:
                 self.container = av.open(self.file)
@@ -295,7 +306,10 @@ class VideoReader:
             raise VideoDecodeError(f"Failed to open {self.file}: {e}") from e
 
         ctx = self.video_stream.codec_context
-        if software_only:
+        if self._videotoolbox and not ctx.is_hwaccel:
+            self._videotoolbox = False
+            log.warning("No VideoToolbox hardware configuration for %s; using software decode", self.file)
+        if software_only and not self._videotoolbox:
             ctx.thread_type = "AUTO"
             if self.vendor is AcceleratorVendor.APPLE:
                 # PyAV frame-thread teardown can deadlock on macOS when a worker
@@ -461,6 +475,30 @@ class VideoReader:
         return frames, consecutive_errors
 
     def _decoded_frames(self, seek_ts: float | None):
+        produced = False
+        try:
+            for frame in self._decoded_frames_impl(seek_ts):
+                if self._videotoolbox and not produced:
+                    log.info("VideoToolbox decoded first frame for %s (host format %s)", self.file, frame.format.name)
+                produced = True
+                yield frame
+        except (VideoDecodeError, av.FFmpegError, ValueError, RuntimeError) as exc:
+            if not self._videotoolbox or produced:
+                # Never restart after delivering frames: replay would duplicate
+                # PTS or drop content. Midstream failures remain visible.
+                raise
+            log.warning("VideoToolbox first-frame decode failed for %s: %s; using software decode", self.file, exc)
+            self.container.close()
+            self._videotoolbox = False
+            self._software_only = True
+            self.container = av.open(self.file)
+            self.video_stream = self.container.streams.video[0]
+            ctx = self.video_stream.codec_context
+            ctx.thread_type = "AUTO"
+            ctx.thread_count = 1
+            yield from self._decoded_frames_impl(seek_ts)
+
+    def _decoded_frames_impl(self, seek_ts: float | None):
         target_pts = None
         if seek_ts is not None:
             start = resolve_video_start_pts(
@@ -566,6 +604,12 @@ class VideoReader:
                 ):
                     raise VideoDecodeError("CPU/MPS software decode currently supports only 8-bit SDR")
                 try:
+                    if self._videotoolbox and frame.format.name == "nv12":
+                        # swscale's direct NV12->RGB fast path uses different
+                        # chroma interpolation from planar software decode.
+                        # Repack identical YUV samples before RGB conversion so
+                        # hardware selection cannot change restored input color.
+                        frame = frame.reformat(format="yuv420p")
                     rgb = reformatter.reformat(
                         frame, width=W, height=H, format="rgb24",
                         src_colorspace=self.metadata.color_space,

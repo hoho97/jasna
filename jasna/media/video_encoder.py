@@ -36,6 +36,7 @@ from jasna.media.container_utils import (
 )
 from jasna.media.encoder_settings import encoder_cq_spec, validate_encoder_settings
 from jasna.media.lut import GpuLutApplier, parse_cube_file
+from jasna.media.videotoolbox import apple_encode_backend
 from jasna.media.probe import VideoMetadata
 from jasna.media.rgb_to_yuv import RgbToYuvConverter
 
@@ -165,7 +166,7 @@ class EncoderSpec:
     encoder_name: str
     frame_format: str  # Packed staging format: "nv12" or "p010le"
     default_options: Mapping[str, str]
-    backend: Literal["hardware", "software"] = "hardware"
+    backend: Literal["hardware", "software", "videotoolbox"] = "hardware"
 
     @property
     def ten_bit(self) -> bool:
@@ -215,6 +216,14 @@ SOFTWARE_ENCODER_SPECS = {
         default_options=MappingProxyType({"crf": "23", "preset": "medium"}),
         backend="software",
     ),
+}
+
+
+VIDEOTOOLBOX_ENCODER_SPECS = {
+    codec: EncoderSpec(
+        encoder_name=f"{codec}_videotoolbox", frame_format="nv12",
+        default_options=MappingProxyType({"allow_sw": "0"}), backend="videotoolbox",
+    ) for codec in ("h264", "hevc")
 }
 
 
@@ -401,6 +410,16 @@ def resolve_encoder_options(
     smart_fragment: bool,
 ) -> tuple[EncoderSpec, dict[str, str]]:
     """Pick the encoder spec and the final FFmpeg options for one output."""
+    if vendor is AcceleratorVendor.APPLE and apple_encode_backend() != "software":
+        if smart_fragment:
+            raise ValueError("VideoToolbox encoding does not support smart fragments")
+        validate_encoder_settings(encoder_settings, codec=codec, vendor=vendor)
+        spec = VIDEOTOOLBOX_ENCODER_SPECS[codec]
+        # A bitrate target is not a CQ/CRF guarantee. Keep b/g unchanged if auto
+        # must open libx264/libx265 instead; never silently drop quality controls.
+        options = dict(spec.default_options) | {"b": str(metadata.video_bitrate if metadata.video_bitrate > 0 else 8_000_000)}
+        options.update({k: _option_value(v) for k, v in encoder_settings.items()})
+        return spec, options
     if vendor in {AcceleratorVendor.APPLE, AcceleratorVendor.CPU}:
         if smart_fragment:
             raise ValueError("Software encoding does not support smart fragments")
@@ -477,15 +496,16 @@ class VideoEncoder:
         spec, self.encoder_options = resolve_encoder_options(
             self.vendor, codec, metadata, encoder_settings, smart_fragment=smart_fragment
         )
-        self._software = spec.backend == "software"
-        # Software encoding owns host RGB snapshots; keep color/postprocessing
+        self._encode_backend = apple_encode_backend() if self.vendor is AcceleratorVendor.APPLE else None
+        self._host_frames = spec.backend in {"software", "videotoolbox"}
+        # Host-frame encoders own RGB snapshots; keep color/postprocessing
         # in the encoder worker on CPU, without concurrent MPS command encoders.
-        self._frame_device = torch.device("cpu") if self._software else self.device
-        if self._software:
+        self._frame_device = torch.device("cpu") if self._host_frames else self.device
+        if self._host_frames:
             if metadata.is_10bit or metadata.color_transfer.lower() in {"smpte2084", "arib-std-b67"}:
-                raise ValueError("Software encoding currently supports only 8-bit SDR input")
+                raise ValueError("Host-frame encoding currently supports only 8-bit SDR input")
             if metadata.video_width % 2 or metadata.video_height % 2:
-                raise ValueError("H.264 4:2:0 software encoding requires even dimensions")
+                raise ValueError("Host-frame 4:2:0 encoding requires even dimensions")
         color_variant = _COLOR_VARIANTS.get((metadata.color_space, metadata.color_range))
         if color_variant is None:
             raise ValueError(f"Unsupported color space or color range: {metadata.color_space} {metadata.color_range}")
@@ -537,6 +557,8 @@ class VideoEncoder:
         try:
             av.Codec(self.encoder_name, "w")
         except ValueError as exc:  # av.codec.codec.UnknownCodecError
+            if self._fallback_to_software(exc):
+                return self._open()
             raise RuntimeError(
                 f"Encoder {self.encoder_name} (codec {self.codec}) is not available in the "
                 f"bundled FFmpeg libraries: {exc}"
@@ -561,7 +583,7 @@ class VideoEncoder:
                 is_hw_owned=False,
             )
             pix_fmt = self.spec.frame_format
-        elif self._software:
+        elif self._host_frames:
             pix_fmt = "yuv420p"
         else:
             pix_fmt = "cuda"
@@ -589,6 +611,19 @@ class VideoEncoder:
         ctx.color_primaries = primaries
         ctx.color_trc = transfer
         self.out_stream = out_v
+        if self.spec.backend == "videotoolbox":
+            try:
+                # Registration alone does not prove a hardware session exists.
+                # Open before workers, packets, or audio muxing; fallback is safe
+                # only here. Later encode/mux failures propagate without replay.
+                self._open_videotoolbox_session(ctx)
+            except (av.FFmpegError, ValueError, RuntimeError) as exc:
+                if self._fallback_to_software(exc):
+                    self.dst.close()
+                    self._src.close()
+                    return self._open()
+                raise self._encoder_open_error(exc) from exc
+            logger.info("Opened VideoToolbox hardware session %s with %s", self.encoder_name, self.encoder_options)
 
         self._copy_source_metadata(in_v, out_v)
         self._setup_source_streams(in_v)
@@ -626,7 +661,7 @@ class VideoEncoder:
             )
             if self._cas is not None:
                 self._cas_luma = torch.empty_like(self._packed[:height])
-            if not self._software:
+            if not self._host_frames:
                 self._host_yuv = torch.empty(
                     (height + height // 2, width),
                     dtype=torch.uint16 if self.spec.ten_bit else torch.uint8,
@@ -646,6 +681,21 @@ class VideoEncoder:
         self._encode_thread = threading.Thread(target=self._encode_worker, name="VideoEncoderWorker", daemon=True)
         self._encode_thread.start()
         return self
+
+    @staticmethod
+    def _open_videotoolbox_session(ctx) -> None:
+        ctx.open()
+
+    def _fallback_to_software(self, exc: Exception) -> bool:
+        if self.spec.backend != "videotoolbox" or self._encode_backend != "auto":
+            return False
+        name = "libx264" if self.codec == "h264" else "libx265"
+        self.spec = EncoderSpec(name, "nv12", MappingProxyType({}), "software")
+        self.encoder_name = name
+        self.encoder_options = {k: v for k, v in self.encoder_options.items() if k != "allow_sw"}
+        logger.warning("VideoToolbox session unavailable: %s; using %s with unchanged bitrate settings %s",
+                       exc, name, self.encoder_options)
+        return True
 
     def _copy_source_metadata(self, in_v, out_v) -> None:
         self.dst.metadata.update(self._src.metadata)
@@ -839,7 +889,7 @@ class VideoEncoder:
         pts: int,
         apply_lut: bool,
     ) -> tuple[torch.Tensor, int, bool, object]:
-        if self._software:
+        if self._host_frames:
             return frame, pts, apply_lut, None
         producer_stream = current_stream(self.device)
         ready_event = new_event(self.device)
@@ -1083,9 +1133,9 @@ class VideoEncoder:
                 planes,
                 format=self.spec.frame_format,
             )
-        if self._software:
+        if self._host_frames:
             # PyAV copies the reusable CPU packed buffer into owned planes;
-            # libx264 may retain them while it delays B-frames.
+            # The encoder may retain them while it delays B-frames.
             hw_frame = av.VideoFrame.from_ndarray(
                 packed.numpy(), format="nv12"
             ).reformat(format="yuv420p")
@@ -1103,14 +1153,14 @@ class VideoEncoder:
     def encode(self, frame: torch.Tensor, pts: int, *, apply_lut: bool = True):
         if self._worker_error is not None:
             raise self._worker_error
-        if self._software:
+        if self._host_frames:
             if (
                 frame.device.type != self.device.type
                 or (self.device.index is not None and frame.device.index != self.device.index)
                 or frame.dtype != torch.uint8
                 or tuple(frame.shape) != (3, self.metadata.video_height, self.metadata.video_width)
             ):
-                raise ValueError("Software encoder expects a device-matching uint8 CHW RGB frame")
+                raise ValueError("Host-frame encoder expects a device-matching uint8 CHW RGB frame")
             # Own the snapshot before returning: callers reuse decoder/blend
             # buffers while both the reorder buffer and worker queue retain it.
             frame = frame.detach().to(
