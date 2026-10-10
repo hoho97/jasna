@@ -84,6 +84,15 @@ exclude = ["jasna.protection.keytool*", "jasna.protection.tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "platform_independent: CPU-capable tests, including mocked accelerator and OS regressions",
+  "nvidia: requires actual NVIDIA hardware or its native SDK",
+  "rocm: requires actual ROCm hardware (with nvidia, either vendor is supported)",
+  "windows: requires a real Windows host",
+  "linux: requires a real Linux host",
+  "mps_real: executes actual Apple MPS tensor or model operations",
+  "model_required: requires external model weights or a proprietary model installation",
+]
 filterwarnings = [
   "ignore:'maxsplit' is passed as positional argument:DeprecationWarning:mmengine\\.utils\\.misc",
   "ignore:`torch\\.jit\\.script` is deprecated:DeprecationWarning",

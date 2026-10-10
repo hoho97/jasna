@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import io
+import sys
+from types import ModuleType
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -27,6 +30,14 @@ class TestModelId:
 
 
 class TestCheckpointPathSelection:
+    @pytest.fixture(autouse=True)
+    def protected_boundary(self, monkeypatch):
+        import jasna.protection as protection
+        module = ModuleType("jasna.protection.protected_model")
+        module.decrypt_model_to_buffer = MagicMock()
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        monkeypatch.setattr(protection, "protected_model", module, raising=False)
+
     def test_plaintext_loaded_directly_when_present(self, tmp_path: Path):
         _write_bundle(tmp_path, with_plaintext=True, with_enc=True)
         with (

@@ -11,6 +11,8 @@ from jasna.gui.settings_panel import SettingsPanel
 from jasna.gui.theme import Colors
 from factories import ltx_models
 
+pytestmark = pytest.mark.usefixtures("nvidia_encoding_gui")
+
 
 def _settings_panel(root: ctk.CTk, tmp_path) -> SettingsPanel:
     panel = SettingsPanel(root, PresetManager(), ltx_models=ltx_models(root, tmp_path, installed=True))

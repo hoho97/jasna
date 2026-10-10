@@ -25,6 +25,8 @@ from jasna.ltx import model_files
 from jasna.ltx.model_files import bundle_names
 from jasna.segments import SegmentRange, SegmentRestoration
 
+pytestmark = pytest.mark.usefixtures("nvidia_encoding_gui")
+
 
 class _NowCalls:
     def post(self, callback) -> None:
@@ -376,8 +378,12 @@ def test_declining_the_trial_offer_does_not_start(monkeypatch) -> None:
     assert len(asked) == 1 and trials == [] and restarted == []
 
 
-def test_trial_session_config_and_key() -> None:
+def test_trial_session_config_and_key(monkeypatch, tmp_path) -> None:
     from jasna.gui.video_session import video_session_config, video_session_key
+    monkeypatch.setattr(
+        "jasna.mosaic.detection_registry.require_detection_model_weights",
+        lambda name: tmp_path / f"{name}.pt",
+    )
 
     real = replace(AppSettings(), restoration_model="ltx")
     trial = replace(real, ltx_trial=True)
@@ -396,7 +402,7 @@ def test_a_trial_seed_preview_never_reuses_a_real_prepared_range() -> None:
     assert prepared_key(segment, real) != prepared_key(segment, replace(real, ltx_trial=True))
 
 
-def test_license_missing_only_for_encrypted_models(tmp_path, monkeypatch) -> None:
+def test_license_missing_only_for_encrypted_models(tmp_path, monkeypatch, license_boundary) -> None:
     from jasna.protection import LicenseError
 
     directory = tmp_path / "ltx"

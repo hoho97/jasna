@@ -22,6 +22,8 @@ from jasna.gui.models import PresetManager
 from jasna.gui.settings_sections.widgets import create_slider_value_label
 from jasna.gui.theme import Colors, Fonts
 
+pytestmark = pytest.mark.usefixtures("nvidia_encoding_gui")
+
 
 def _record_geometry(window, monkeypatch) -> list[str]:
     """Capture the logical geometry strings handed to CTk, which scales them by the DPI factor.
@@ -322,7 +324,7 @@ def test_slider_value_label_font_scales_at_hidpi(hidpi) -> None:
         label = create_slider_value_label(root, "90", 4, Colors.BG_PANEL)
 
         expected_size = round(Fonts.SIZE_NORMAL * hidpi)
-        assert label.cget("font") == f"{Fonts.FAMILY} -{expected_size}"
+        assert label.tk.splitlist(label.cget("font")) == (Fonts.FAMILY, str(-expected_size))
     finally:
         root.destroy()
 

@@ -88,7 +88,9 @@ def test_processor_uses_each_videos_detection_and_projection_overrides(tmp_path)
     assert processor._settings.vr_projection == "auto"
 
 
-def test_video_job_passes_precomputed_splice_plan_to_pipeline(tmp_path) -> None:
+def test_video_job_passes_precomputed_splice_plan_to_pipeline(tmp_path, nvidia_build) -> None:
+    import torch
+
     input_path = tmp_path / "video.mp4"
     output_path = tmp_path / "output.mp4"
     segments = (SegmentRange(1, 2),)
@@ -97,7 +99,7 @@ def test_video_job_passes_precomputed_splice_plan_to_pipeline(tmp_path) -> None:
     pipeline = MagicMock()
     processor = Processor()
     processor._settings = AppSettings()
-    processor._video_session = RestorationSession(device=MagicMock(), restoration_pipeline=MagicMock())
+    processor._video_session = RestorationSession(device=torch.device("cuda:0"), restoration_pipeline=MagicMock())
     processor._ensure_video_session = MagicMock()
     processor._prepare_job_detector = MagicMock()
     

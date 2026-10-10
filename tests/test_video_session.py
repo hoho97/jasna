@@ -4,12 +4,17 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from jasna.gui.models import AppSettings
 from jasna.gui.video_session import (
     build_video_session,
     video_session_config,
     video_session_key,
 )
+
+
+pytestmark = pytest.mark.usefixtures("nvidia_build", "nvidia_optional_modules")
 
 
 def test_video_session_key_stable_for_identical_settings() -> None:

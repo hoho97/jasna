@@ -7,6 +7,16 @@ import types
 from pathlib import Path
 
 import torch
+import pytest
+
+from jasna.engine_paths import get_onnx_tensorrt_engine_path
+
+
+@pytest.fixture(autouse=True)
+def compiler_boundary(nvidia_trt_compiler, monkeypatch):
+    # Exercise export/composition without loading the external TensorRT SDK.
+    monkeypatch.setattr(sys.modules["jasna.trt"], "get_onnx_tensorrt_engine_path",
+                        get_onnx_tensorrt_engine_path, raising=False)
 
 
 def _touch(path: Path) -> None:

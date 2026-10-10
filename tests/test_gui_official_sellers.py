@@ -39,8 +39,8 @@ def test_wizard_names_the_official_sellers(monkeypatch):
     ("LicenseError", "license_invalid"),
     ("MalformedLicenseError", "license_malformed"),
 ])
-def test_license_dialog_explains_rejected_keys(monkeypatch, error_name, message_key):
-    protection = pytest.importorskip("jasna.protection")
+def test_license_dialog_explains_rejected_keys(monkeypatch, license_boundary, error_name, message_key):
+    protection = license_boundary
     from jasna.gui.components import LicenseDialog
     from jasna.protection import license_store
 

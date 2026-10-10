@@ -17,6 +17,8 @@ from jasna.gui.queue_panel import QueuePanel
 from jasna.segments import SegmentRange
 from jasna.gui.theme import Colors, Sizing
 
+pytestmark = pytest.mark.usefixtures("nvidia_encoding_gui")
+
 
 def test_reset_jobs_for_run_prepares_every_status_and_preserves_job_options(
     tmp_path: Path,

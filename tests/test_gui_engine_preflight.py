@@ -10,11 +10,9 @@ from jasna.gui.engine_preflight import run_engine_preflight
 from jasna.gui.models import AppSettings
 
 
-@pytest.fixture(autouse=True)
-def _use_nvidia_preflight_by_default(monkeypatch):
-    import jasna.accelerator as accelerator
-
-    monkeypatch.setattr(accelerator, "is_amd_device", lambda _device: False)
+# Simulate the NVIDIA build identity without replacing functions that other
+# modules may capture on first import (which made focused runs order-dependent).
+pytestmark = pytest.mark.usefixtures("nvidia_build")
 
 
 def _touch(path: Path) -> None:
