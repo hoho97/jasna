@@ -132,3 +132,18 @@ def test_jasna_main_pid_child_exits_without_dispatch(monkeypatch) -> None:
             assert e.value.code == 0
             run_gui.assert_not_called()
             main.assert_not_called()
+
+
+@pytest.mark.parametrize("flag", ["--help", "--version"])
+def test_macos_module_entry_is_headless(monkeypatch, flag):
+    """macOS CLI flags dispatch without importing tkinter/VLC GUI code."""
+    for name in list(sys.modules):
+        if name == "jasna.__main__" or name.startswith("jasna.gui"):
+            del sys.modules[name]
+    monkeypatch.delenv("JASNA_MAIN_PID", raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "argv", ["jasna", flag])
+    with patch("jasna.main.main") as main:
+        import jasna.__main__  # noqa: F401
+    main.assert_called_once_with()
+    assert "jasna.gui" not in sys.modules

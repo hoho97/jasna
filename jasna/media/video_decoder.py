@@ -297,6 +297,11 @@ class VideoReader:
         ctx = self.video_stream.codec_context
         if software_only:
             ctx.thread_type = "AUTO"
+            if self.vendor is AcceleratorVendor.APPLE:
+                # PyAV frame-thread teardown can deadlock on macOS when a worker
+                # stops at the first decoded batch. Use one software decode
+                # thread so cancellation can close partial iterators safely.
+                ctx.thread_count = 1
         elif self.vendor is AcceleratorVendor.AMD:
             self._setup_amf_decoder(ctx)
         elif not ctx.is_hwaccel:

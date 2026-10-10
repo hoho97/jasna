@@ -81,6 +81,8 @@ def test_h264_batches_pts_pixels_and_lifetime(video, device, monkeypatch, backen
     retained, pts, snapshots = [], [], []
     with module.VideoReader(str(path), 6, device, metadata) as reader:
         assert reader._software_only and reader._decoder_ctx is None
+        if device.type == "mps":
+            assert reader.video_stream.codec_context.thread_count == 1
         for batch, group_pts in reader.frames():
             assert batch.device.type == device.type
             assert batch.dtype == torch.uint8 and batch.is_contiguous()

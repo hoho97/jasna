@@ -671,9 +671,9 @@ def run_restoration_pass(
     max_clip_size = pipeline.max_clip_size
     secondary_workers = max(1, int(restoration_pipeline.secondary_num_workers))
     if device.type == "mps":
-        # Explicit P0 envelope, rather than silently changing clip/overlap semantics.
-        if not 1 <= pipeline.batch_size <= 2 or not 1 <= max_clip_size <= 32:
-            raise ValueError("MPS pipeline requires batch_size=1..2 and max_clip_size=1..32; "
+        # Explicit envelope, including the upstream batch/clip defaults; never clamp user settings.
+        if not 1 <= pipeline.batch_size <= 4 or not 1 <= max_clip_size <= 90:
+            raise ValueError("MPS pipeline requires batch_size=1..4 and max_clip_size=1..90; "
                              "use a small clip and temporal_overlap < max_clip_size/2")
         if use_async_secondary:
             raise ValueError("MPS pipeline does not support async secondary restoration")

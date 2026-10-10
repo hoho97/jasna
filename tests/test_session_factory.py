@@ -193,3 +193,33 @@ def test_build_pipeline_keeps_a_session_that_holds_the_job_model() -> None:
 
     assert session.restoration_pipeline is pipeline
     assert session.ltx_files is None
+
+
+def test_mps_session_uses_eager_models_without_compiler_subprocess(monkeypatch, tmp_path):
+    monkeypatch.setattr(torch.backends.mps, "is_built", lambda: True)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    detector_path = tmp_path / "rfdetr-v6.pt"
+    detector_path.touch()
+    config = session_config(device="mps", fp16=False, compile_basicvsrpp=False,
+                            batch_size=1, max_clip_size=16, temporal_overlap=2,
+                            detection_model_name="rfdetr-v6", detection_model_path=detector_path,
+                            codec="h264", encoder_settings={}, vr_mode="off")
+    with (
+        patch("jasna.engine_compiler.subprocess.Popen", side_effect=AssertionError("TensorRT subprocess")),
+        patch("jasna.restorer.basicvsrpp_mosaic_restorer.BasicvsrppMosaicRestorer") as restorer,
+        patch("jasna.mosaic.detection_registry.build_detection_model") as detector,
+    ):
+        session = build_restoration_session(config, log_callback=None)
+        first = session.detection_model_for(config)
+        assert session.detection_model_for(config) is first
+        assert session.device == torch.device("mps")
+        assert restorer.call_args.kwargs["use_tensorrt"] is False
+        assert restorer.call_args.kwargs["fp16"] is False
+        assert restorer.call_args.kwargs["max_clip_size"] == 16
+        assert session.restoration_pipeline.secondary_restorer is None
+        assert detector.call_args.kwargs["device"] == torch.device("mps")
+        assert detector.call_args.kwargs["fp16"] is False
+        detector.assert_called_once()
+        session.close()
+        first.close.assert_called_once()
+        restorer.return_value.close.assert_called_once()
