@@ -36,8 +36,9 @@ def frames() -> torch.Tensor:
     images = []
     with av.open(str(video)) as container:
         for index, frame in enumerate(container.decode(video=0)):
-            # The same known fixture pair used by the RF-DETR real-MPS gate:
-            # one clean frame and one mosaic-positive frame.
+            # Use the same real-video frames exercised by the RF-DETR MPS gate.
+            # YOLO and RF-DETR need not classify each frame identically; the empty
+            # Detections contract is exercised separately with a deterministic blank.
             if index in (0, 120):
                 rgb = frame.to_ndarray(format="rgb24")
                 images.append(torch.from_numpy(rgb).permute(2, 0, 1))
@@ -114,7 +115,12 @@ def test_real_lada_yolo_v4_mps_inference_matches_cpu_and_tracker(frames, monkeyp
         assert mps_model._resizer is None
         _assert_detector_tensors_on(mps_model, "mps")
 
-        uploaded = frames.to("mps")
+        # Keep real video frames for model/postprocess validation, then add a blank
+        # frame to exercise the empty Detections path deterministically. This avoids
+        # assuming YOLO and RF-DETR produce the same classification for frame 0.
+        real_count = len(frames)
+        cases = torch.cat((frames, torch.zeros_like(frames[:1])), dim=0)
+        uploaded = cases.to("mps")
         mps_results = []
         scan_results = []
         for frame in uploaded:
@@ -129,7 +135,7 @@ def test_real_lada_yolo_v4_mps_inference_matches_cpu_and_tracker(frames, monkeyp
             assert torch.isfinite(pred_raw).all().item()
             assert torch.isfinite(proto).all().item()
 
-            detections = mps_model(one, target_hw=tuple(frames.shape[-2:]))
+            detections = mps_model(one, target_hw=tuple(cases.shape[-2:]))
             assert len(detections.boxes_xyxy) == len(detections.masks) == 1
             assert detections.boxes_xyxy[0].dtype == np.float32
             assert np.isfinite(detections.boxes_xyxy[0]).all()
@@ -145,8 +151,8 @@ def test_real_lada_yolo_v4_mps_inference_matches_cpu_and_tracker(frames, monkeyp
             scan_results.append((score.cpu(), mask.cpu()))
 
         counts = [len(result.boxes_xyxy[0]) for result in mps_results]
-        assert any(count == 0 for count in counts), "fixture must exercise empty detections"
-        assert any(count > 0 for count in counts), "fixture must exercise a real mosaic detection"
+        assert any(count > 0 for count in counts[:real_count]), "real fixture must exercise a mosaic detection"
+        assert counts[-1] == 0, "blank input must exercise empty detections"
         assert nms_devices and set(nms_devices) == {"mps"}
         forbidden.assert_not_called()
 
@@ -165,9 +171,9 @@ def test_real_lada_yolo_v4_mps_inference_matches_cpu_and_tracker(frames, monkeyp
 
         cpu_results = []
         cpu_scans = []
-        for frame in frames:
+        for frame in cases:
             one = frame.unsqueeze(0)
-            cpu_results.append(cpu_model(one, target_hw=tuple(frames.shape[-2:])))
+            cpu_results.append(cpu_model(one, target_hw=tuple(cases.shape[-2:])))
             score, mask = cpu_model.scan_scores_masks(one, mask_hw=(90, 160))
             cpu_scans.append((score, mask))
 
@@ -188,10 +194,11 @@ def test_real_lada_yolo_v4_mps_inference_matches_cpu_and_tracker(frames, monkeyp
             iou = torch.where(union > 0, intersection / union.clamp_min(1), torch.ones_like(union))
             assert torch.all(iou >= 0.95), f"MPS/CPU scan mask IoU too low: {iou.tolist()}"
 
-        # Feed the real detector contract through the tracker on-device. Boxes stay
-        # CPU numpy arrays while boolean masks stay on MPS throughout tracking.
-        positive = next(result for result in mps_results if len(result.boxes_xyxy[0]) > 0)
-        empty = next(result for result in mps_results if len(result.boxes_xyxy[0]) == 0)
+        # Feed the detector contract through the tracker on-device. Real-video boxes
+        # stay CPU numpy arrays while boolean masks stay on MPS; the blank case then
+        # verifies termination through an actual empty Detections result.
+        positive = next(result for result in mps_results[:real_count] if len(result.boxes_xyxy[0]) > 0)
+        empty = mps_results[-1]
         tracker = ClipTracker(max_clip_size=8)
         ended, active = tracker.update(0, positive.boxes_xyxy[0], positive.masks[0])
         assert not ended and active
