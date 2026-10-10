@@ -75,14 +75,18 @@ def test_mps_compile_validates_checkpoint_without_compiling(monkeypatch, tmp_pat
     ("mps", True, False), ("mps", False, False),
     ("cuda:0", True, True), ("cuda:0", False, False),
 ])
-def test_runner_precision_policy(monkeypatch, tmp_path, device, requested, expected):
+@pytest.mark.parametrize("eager", [False, True])
+def test_runner_precision_policy(monkeypatch, tmp_path, device, requested, expected, eager):
+    monkeypatch.setenv("JASNA_MPS_RFDETR_EAGER", "1" if eager else "0")
     import jasna.mosaic.rfdetr_torch_runner as module
     path = tmp_path / "model.pt"
     torch.save({"model": {"class_embed.weight": torch.ones(3, 256)}}, path)
     core = Mock()
     core.to.return_value = core
     core.eval.return_value = core
-    wrapper = Mock(return_value=SimpleNamespace(model=SimpleNamespace(model=core)))
+    optimize = Mock()
+    context = SimpleNamespace(model=core, inference_model=core)
+    wrapper = Mock(return_value=SimpleNamespace(model=context, optimize_for_inference=optimize))
     monkeypatch.setitem(sys.modules, "rfdetr", SimpleNamespace(RFDETRSegMedium=wrapper))
     monkeypatch.setattr(module, "device_name", lambda _: "test")
     runner = RfDetrTorchRunner(path, [(2, 3, 576, 576)], torch.device(device),
@@ -90,6 +94,11 @@ def test_runner_precision_policy(monkeypatch, tmp_path, device, requested, expec
     assert runner.fp16 is expected
     assert wrapper.call_args.kwargs["device"] == ("cpu" if device == "mps" else device)
     core.to.assert_called_once_with(torch.device(device))
+    assert runner._exported is (device == 'mps' and not eager)
+    if device == 'mps' and not eager:
+        optimize.assert_called_once_with(compile=False, dtype=torch.float32, inplace=True)
+    else:
+        optimize.assert_not_called()
 
 
 @pytest.mark.parametrize("filename,error,match", [
@@ -109,3 +118,17 @@ def test_direct_mps_detector_rejects_missing_or_foreign_weights(monkeypatch, tmp
             weights_path=path, batch_size=1, device=torch.device("mps"),
             resolution=576, dynamic_batch=True, torch_variant="medium",
         )
+
+
+def test_exported_runner_preserves_public_output_contract():
+    runner = RfDetrTorchRunner.__new__(RfDetrTorchRunner)
+    runner.device, runner.fp16, runner._exported = torch.device('cpu'), False, True
+    tensors = (torch.rand(2, 200, 4), torch.rand(2, 200, 3), torch.rand(2, 200, 144, 144))
+    runner._core = Mock(return_value=tensors)
+    actual = runner.infer({'input': torch.zeros(2, 3, 576, 576)})
+    assert set(actual) == {'dets', 'labels', 'masks'}
+    for key, value in zip(('dets','labels','masks'), tensors):
+        assert actual[key] is value
+    runner.close()
+    with pytest.raises(RuntimeError, match='closed'):
+        runner.infer({'input': torch.empty(0)})

@@ -109,7 +109,8 @@ def test_real_checkpoint_inference_and_cpu_reference(frames, monkeypatch, name, 
         cpu_input = x.cpu()
         model.runner._core.to("cpu")
         with torch.no_grad():
-            cpu = model.runner._core(cpu_input)
+            raw = model.runner._core(cpu_input)
+            cpu = dict(zip(('pred_boxes', 'pred_logits', 'pred_masks'), raw))
         errors = {}
         for key, source in (("dets", "pred_boxes"), ("labels", "pred_logits"), ("masks", "pred_masks")):
             actual = outputs[key].cpu()
@@ -203,3 +204,30 @@ def test_mps_sdpa_and_layernorm_match_cpu(frames):
     x = torch.randn(2, 64, 256, generator=generator)
     actual = F.layer_norm(x.to("mps"), (256,))
     torch.testing.assert_close(actual.cpu(), F.layer_norm(x, (256,)), rtol=1e-5, atol=1e-6)
+
+
+def test_inference_export_matches_original_fp32_for_all_pipeline_batches(frames, monkeypatch):
+    # Same live weights, same final outputs: prove the removed auxiliary work
+    # changes neither query order nor masks, including a partial last batch.
+    monkeypatch.setenv('JASNA_MPS_RFDETR_EAGER', '1')
+    config = rfdetr_model_config('rfdetr-v6')
+    model = build_detection_model('rfdetr-v6',
+        Path(os.environ['JASNA_TEST_MODEL_WEIGHTS_DIR']) / 'rfdetr-v6.pt',
+        batch_size=4, device=torch.device('mps'), score_threshold=config.score_threshold, fp16=False)
+    try:
+        uploaded = frames.repeat(2,1,1,1).to('mps')
+        inputs = {batch:model._preprocess(uploaded[:batch]) for batch in (1,2,3,4)}
+        references = {batch:model._infer(x) for batch,x in inputs.items()}
+        model.runner._wrapper.optimize_for_inference(compile=False, dtype=torch.float32, inplace=True)
+        model.runner._core = model.runner._wrapper.model.inference_model.to('mps').eval()
+        model.runner._exported = True
+        for batch,x in inputs.items():
+            actual = model._infer(x)
+            for key in references[batch]:
+                assert actual[key].device.type == 'mps' and actual[key].dtype == torch.float32
+                assert torch.isfinite(actual[key]).all().item()
+                torch.testing.assert_close(actual[key], references[batch][key], rtol=0, atol=0)
+        print('\nRF-DETR v6 FP32 inference export: batches 1/2/3/4, exact boxes/logits/masks parity')
+    finally:
+        model.close()
+        torch.mps.empty_cache()

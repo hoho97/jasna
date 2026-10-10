@@ -170,6 +170,7 @@ def test_direct_yolo_mps_load_rejects_foreign_formats(tmp_path, suffix):
 
 
 def test_rfdetr_constructs_on_cpu_before_mps_transfer(monkeypatch, tmp_path):
+    monkeypatch.delenv("JASNA_MPS_RFDETR_EAGER", raising=False)
     from types import SimpleNamespace
     import sys
     from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner
@@ -187,8 +188,14 @@ def test_rfdetr_constructs_on_cpu_before_mps_transfer(monkeypatch, tmp_path):
         def __init__(self, **kwargs):
             events.append(("construct", kwargs["device"]))
             self.model = SimpleNamespace(model=Core())
+        def optimize_for_inference(self, **kwargs):
+            events.append(("export", kwargs))
+            self.model.inference_model = self.model.model
+            self.model.model = None
     monkeypatch.setitem(sys.modules, "rfdetr", SimpleNamespace(RFDETRSegMedium=Wrapper))
     monkeypatch.setattr(module, "device_name", lambda device: "test MPS")
     runner = RfDetrTorchRunner(weights, [(1, 3, 576, 576)], torch.device("mps"), fp16=False, resolution=576, variant="medium")
-    assert events == [("construct", "cpu"), ("transfer", "mps")]
+    assert events == [("construct", "cpu"),
+                      ("export", dict(compile=False, dtype=torch.float32, inplace=True)),
+                      ("transfer", "mps")]
     runner.close()
