@@ -95,6 +95,8 @@ def observe_pipeline(profile, *, detail_transfers=False):
     from jasna.media import video_decoder, video_encoder
     from jasna.mosaic.rfdetr import RfDetrMosaicDetectionModel
     from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner
+    from jasna.mosaic.rfdetr_mlx_runner import RfDetrMlxRunner
+    from jasna.mosaic.rfdetr_coreml_runner import RfDetrCoreMLRunner
     from jasna.models.basicvsrpp.mmagic.basicvsr_plusplus_net import BasicVSRPlusPlusNet, SecondOrderDeformableAlignment
     from jasna.restorer.basicvsrpp_mosaic_restorer import BasicvsrppMosaicRestorer
     from jasna.restorer.restoration_pipeline import RestorationPipeline
@@ -105,6 +107,10 @@ def observe_pipeline(profile, *, detail_transfers=False):
         (RfDetrMosaicDetectionModel, '_postprocess', 'detector.postprocess'),
         (RfDetrMosaicDetectionModel, 'scan_scores_masks', 'detector.scan_with_mask_resize'),
         (RfDetrTorchRunner, 'infer', 'detector.forward_submission'),
+        (RfDetrMlxRunner, '_raw', 'detector.mlx_handoff_and_forward_submission'),
+        (RfDetrMlxRunner, 'detect', 'detector.mlx_forward_and_postprocess'),
+        (RfDetrCoreMLRunner, '_raw', 'detector.coreml_handoff_and_forward'),
+        (RfDetrCoreMLRunner, 'detect', 'detector.coreml_forward_and_postprocess'),
         (BasicvsrppMosaicRestorer, 'raw_process', 'restorer.forward_submission'),
         (RestorationPipeline, '_prepare_from_raw_crops', 'restorer.crop_preparation'),
         (BasicVSRPlusPlusNet, 'compute_flow', 'restorer.spynet_submission'),

@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import plistlib
 import subprocess
 import sys
 import threading
@@ -75,8 +76,13 @@ def main():
                machine=platform.machine(), command=command, input_sha256=sha256(args.input),
                weights=hashes, observed=args.observe, detail_transfers=args.detail_transfers,
                versions={p: importlib.metadata.version(p) for p in ('torchvision', 'av', 'rfdetr', 'numpy', 'mmengine')},
-               media={k: os.environ.get(k) for k in ('JASNA_ENCODE_BACKEND', 'JASNA_DECODE_BACKEND', 'JASNA_MPS_RFDETR_EXPORT')},
+               media={k: os.environ.get(k) for k in ('JASNA_ENCODE_BACKEND', 'JASNA_DECODE_BACKEND', 'JASNA_MPS_RFDETR_EXPORT', 'JASNA_APPLE_RFDETR_BACKEND', 'JASNA_RFDETR_COREML_DIR')},
                git=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+    for package in ('mlx', 'coremltools'):
+        try:
+            env['versions'][package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            env['versions'][package] = None
     save('environment.json', env)
     counts = dict(detection_calls=0, frames=0, positive_frames=0, detections=0,
                   restoration_calls=0, restoration_frames=0, restoration_kept_frames=0)
@@ -106,11 +112,26 @@ def main():
     process = psutil.Process()
     samples, stop = [], threading.Event()
     start = time.perf_counter()
+    def mlx_memory():
+        # Do not import MLX for Torch/Core ML or foreign-vendor benchmark jobs.
+        if os.environ.get('JASNA_APPLE_RFDETR_BACKEND') != 'mlx':
+            return None
+        import mlx.core as mx
+        return dict(active=mx.get_active_memory(), peak=mx.get_peak_memory(), cache=mx.get_cache_memory())
+    def gpu_stats():
+        try:
+            result = subprocess.run(['ioreg', '-r', '-c', 'AGXAccelerator', '-a'], capture_output=True, timeout=3, check=True)
+            devices = plistlib.loads(result.stdout)
+            return devices[0].get('PerformanceStatistics', {}) if devices else {}
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            return dict(unavailable=str(exc))
     def monitor():
         while not stop.wait(5):
             samples.append(dict(seconds=time.perf_counter()-start, rss=process.memory_info().rss,
                                 host_available=psutil.virtual_memory().available, swap=psutil.swap_memory().used,
-                                mps_allocated=torch.mps.current_allocated_memory(), driver=torch.mps.driver_allocated_memory()))
+                                mps_allocated=torch.mps.current_allocated_memory(), driver=torch.mps.driver_allocated_memory(),
+                                cpu_percent=process.cpu_percent(),
+                                mlx=mlx_memory(), gpu=gpu_stats()))
             save('progress.json', dict(**counts, memory=samples[-1], stages=profile.snapshot()))
     thread = threading.Thread(target=monitor, daemon=True)
     os.environ['JASNA_MODEL_WEIGHTS_DIR'] = str(args.weights)
